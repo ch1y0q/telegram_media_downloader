@@ -51,6 +51,7 @@ class DownloadBot:
         self.client = None
         self.add_download_task: Callable = None
         self.download_chat_task: Callable = None
+        self.download_chat_task_sequential: Callable = None
         self.app = None
         self.listen_forward_chat: dict = {}
         self.config: dict = {}
@@ -139,6 +140,7 @@ class DownloadBot:
         client: pyrogram.Client,
         add_download_task: Callable,
         download_chat_task: Callable,
+        download_chat_task_sequential: Callable,
     ):
         """Start bot"""
         self.bot = pyrogram.Client(
@@ -167,6 +169,12 @@ class DownloadBot:
                 _t("Forward video, use the method to directly enter /forward to view"),
             ),
             types.BotCommand(
+                "forward_sequential",
+                _t(
+                    "Forward protected video sequentially, use /forward_sequential to view"
+                ),
+            ),
+            types.BotCommand(
                 "listen_forward",
                 _t(
                     "Listen forward, use the method to directly enter /listen_forward to view"
@@ -186,6 +194,7 @@ class DownloadBot:
         self.client = client
         self.add_download_task = add_download_task
         self.download_chat_task = download_chat_task
+        self.download_chat_task_sequential = download_chat_task_sequential
 
         # load config
         if os.path.exists(self.config_path):
@@ -222,6 +231,13 @@ class DownloadBot:
             MessageHandler(
                 forward_messages,
                 filters=pyrogram.filters.command(["forward"])
+                & pyrogram.filters.user(self.allowed_user_ids),
+            )
+        )
+        self.bot.add_handler(
+            MessageHandler(
+                forward_messages_sequential,
+                filters=pyrogram.filters.command(["forward_sequential"])
                 & pyrogram.filters.user(self.allowed_user_ids),
             )
         )
@@ -320,9 +336,16 @@ async def start_download_bot(
     client: pyrogram.Client,
     add_download_task: Callable,
     download_chat_task: Callable,
+    download_chat_task_sequential: Callable,
 ):
     """Start download bot"""
-    await _bot.start(app, client, add_download_task, download_chat_task)
+    await _bot.start(
+        app,
+        client,
+        add_download_task,
+        download_chat_task,
+        download_chat_task_sequential,
+    )
 
 
 async def stop_download_bot():
@@ -389,6 +412,7 @@ async def send_help_str(client: pyrogram.Client, chat_id):
         f"/get_info - {_t('Get group and user info from message link')}\n"
         f"/download - {_t('Download messages')}\n"
         f"/forward - {_t('Forward messages')}\n"
+        f"/forward_sequential - {_t('Forward protected messages sequentially')}\n"
         f"/listen_forward - {_t('Listen for forwarded messages')}\n"
         f"/forward_to_comments - {_t('Forward a specific media to a comment section')}\n"
         f"/set_language - {_t('Set language')}\n"
@@ -1121,7 +1145,11 @@ async def get_forward_task_node(
 
 # pylint: disable = R0914
 async def forward_message_impl(
-    client: pyrogram.Client, message: pyrogram.types.Message, reply_comment: bool
+    client: pyrogram.Client,
+    message: pyrogram.types.Message,
+    reply_comment: bool,
+    use_sequential_for_protected: bool = False,
+    command_name: str = "/forward",
 ):
     """
     Forward message
@@ -1134,7 +1162,7 @@ async def forward_message_impl(
             message.from_user.id,
             f"{_t('Invalid command format')}."
             f"{_t('Please use')} "
-            "/forward https://t.me/c/src_chat https://t.me/c/dst_chat "
+            f"{command_name} https://t.me/c/src_chat https://t.me/c/dst_chat "
             f"1 400 `[`{_t('Filter')}`]`\n",
         )
 
@@ -1198,7 +1226,10 @@ async def forward_message_impl(
             await report_bot_status(client, node, immediate_reply=True)
             node.stop_transmission()
     else:
-        await forward_msg(node, offset_id)
+        if use_sequential_for_protected:
+            await forward_msg_sequential(node, offset_id)
+        else:
+            await forward_msg(node, offset_id)
 
 
 async def forward_messages(client: pyrogram.Client, message: pyrogram.types.Message):
@@ -1213,6 +1244,19 @@ async def forward_messages(client: pyrogram.Client, message: pyrogram.types.Mess
         None
     """
     return await forward_message_impl(client, message, False)
+
+
+async def forward_messages_sequential(
+    client: pyrogram.Client, message: pyrogram.types.Message
+):
+    """Forward protected messages sequentially to reduce disk footprint."""
+    return await forward_message_impl(
+        client,
+        message,
+        False,
+        use_sequential_for_protected=True,
+        command_name="/forward_sequential",
+    )
 
 
 async def forward_normal_content(
@@ -1259,6 +1303,20 @@ async def forward_msg(node: TaskNode, message_id: int):
     chat_download_config.download_filter = node.download_filter  # type: ignore
 
     await _bot.download_chat_task(_bot.client, chat_download_config, node)
+
+
+async def forward_msg_sequential(node: TaskNode, message_id: int):
+    """Forward protected content sequentially without queueing all downloads."""
+    chat_download_config = ChatDownloadConfig()
+    chat_download_config.last_read_message_id = message_id
+    chat_download_config.download_filter = node.download_filter  # type: ignore
+
+    if _bot.download_chat_task_sequential:
+        await _bot.download_chat_task_sequential(
+            _bot.client, chat_download_config, node
+        )
+    else:
+        await _bot.download_chat_task(_bot.client, chat_download_config, node)
 
 
 async def check_new_messages(

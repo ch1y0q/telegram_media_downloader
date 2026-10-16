@@ -45,6 +45,11 @@ translations = {
     ],
     "Download messages": ["下载消息", "Скачать сообщения", "Скачати повідомлення"],
     "Forward messages": ["转发消息", "Переслать сообщения", "Переслати повідомлення"],
+    "Forward protected messages sequentially": [
+        "顺序转发受保护消息",
+        "Последовательно пересылать защищенные сообщения",
+        "Послідовно пересилати захищені повідомлення",
+    ],
     "Listen for forwarded messages": [
         "监听转发消息",
         "Прослушивать пересланные сообщения",
@@ -75,6 +80,11 @@ translations = {
         "转发视频，使用方法直接输入/forward查看",
         "Переслать видео, введите /forward для просмотра",
         "Переслати відео, введіть /forward для перегляду",
+    ],
+    "Forward protected video sequentially, use /forward_sequential to view": [
+        "顺序转发受保护视频，使用方法直接输入/forward_sequential查看",
+        "Последовательно пересылать защищенное видео, введите /forward_sequential для просмотра",
+        "Послідовно пересилати захищене відео, введіть /forward_sequential для перегляду",
     ],
     "Listen forward, use the method to directly enter /listen_forward to view": [
         "监控转发，使用方法直接输入/listen_forward查看",
