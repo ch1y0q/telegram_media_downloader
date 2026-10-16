@@ -1,5 +1,47 @@
 """Downloads media from telegram."""
 import asyncio
+# Ensure an event loop exists on Python 3.10+ before importing libraries
+# that call `asyncio.get_event_loop()` at import time (e.g. pyrogram.sync).
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+import ast
+
+# Workaround for packages (werkzeug) that reference legacy AST classes
+# removed in Python 3.14 (e.g. `ast.Str`, `ast.Num`). Provide
+# backwards-compatible types and simple constructors so older library
+# code continues to work.
+if not hasattr(ast, "Str"):
+    class _LegacyStr(ast.Constant):
+        def __init__(self, s=None):
+            super().__init__(value=s)
+
+        @property
+        def s(self):
+            return getattr(self, "value", None)
+
+    class _LegacyNum(ast.Constant):
+        def __init__(self, n=None):
+            super().__init__(value=n)
+
+        @property
+        def n(self):
+            return getattr(self, "value", None)
+
+    def _make_str(*args, **kwargs):
+        s = kwargs.get("s") if "s" in kwargs else (args[0] if args else None)
+        return _LegacyStr(s)
+
+    def _make_num(*args, **kwargs):
+        n = kwargs.get("n") if "n" in kwargs else (args[0] if args else None)
+        return _LegacyNum(n)
+
+    ast.Str = _LegacyStr
+    ast.Num = _LegacyNum
+    ast.make_Str = _make_str
+    ast.make_Num = _make_num
 import logging
 import os
 import shutil
