@@ -87,7 +87,10 @@ DATA_FILE_NAME = "data.yaml"
 APPLICATION_NAME = "media_downloader"
 app = Application(CONFIG_NAME, DATA_FILE_NAME, APPLICATION_NAME)
 
-queue: asyncio.Queue = asyncio.Queue()
+download_queue: asyncio.Queue = asyncio.Queue()
+# Keep the old name for callers that enqueue normal download tasks directly.
+queue = download_queue
+upload_queue: asyncio.Queue = asyncio.Queue()
 RETRY_TIME_OUT = 3
 
 logging.getLogger("pyrogram.session.session").addFilter(LogFilter())
@@ -349,9 +352,6 @@ async def download_task(
     if app.enable_download_txt and message.text and not message.media:
         download_status, file_name = await save_msg_to_file(app, node.chat_id, message)
 
-    if not node.bot:
-        app.set_download_id(node, message.id, download_status)
-
     node.download_status[message.id] = download_status
 
     file_size = os.path.getsize(file_name) if file_name else 0
@@ -366,18 +366,19 @@ async def download_task(
         file_name,
     )
 
-    # rclone upload
+    # Cloud uploads run independently from download workers.
     if (
         not node.upload_telegram_chat_id
         and download_status is DownloadStatus.SuccessDownload
+        and app.cloud_drive_config.enable_upload_file
     ):
         ui_file_name = file_name
         if app.hide_file_name:
             ui_file_name = f"****{os.path.splitext(file_name)[-1]}"
-        if await app.upload_file(
-            file_name, update_cloud_upload_stat, (node, message.id, ui_file_name)
-        ):
-            node.upload_success_count += 1
+        await upload_queue.put((file_name, node, message.id, ui_file_name))
+
+    if not node.bot:
+        app.set_download_id(node, message.id, download_status)
 
     await report_bot_download_status(
         node.bot,
@@ -562,8 +563,9 @@ def _check_config() -> bool:
 
 
 async def worker(client: pyrogram.client.Client):
-    """Work for download task"""
+    """Consume download tasks."""
     while app.is_running:
+        item = None
         try:
             item = await queue.get()
             message = item[0]
@@ -578,6 +580,29 @@ async def worker(client: pyrogram.client.Client):
                 await download_task(client, message, node)
         except Exception as e:
             logger.exception(f"{e}")
+        finally:
+            if item is not None:
+                queue.task_done()
+
+
+async def upload_worker():
+    """Consume cloud upload tasks independently from download tasks."""
+    while app.is_running:
+        item = None
+        try:
+            item = await upload_queue.get()
+            file_name, node, message_id, ui_file_name = item
+            if await app.upload_file(
+                file_name,
+                update_cloud_upload_stat,
+                (node, message_id, ui_file_name),
+            ):
+                node.upload_success_count += 1
+        except Exception as e:
+            logger.exception(f"{e}")
+        finally:
+            if item is not None:
+                upload_queue.task_done()
 
 
 async def _process_chat_message_for_download(
@@ -737,6 +762,7 @@ async def run_until_all_task_finish():
                 finish = False
 
         if (not app.bot_token and finish) or app.restart_program:
+            await upload_queue.join()
             break
 
         await asyncio.sleep(1)
@@ -787,6 +813,10 @@ def main():
         for _ in range(app.max_download_task):
             task = app.loop.create_task(worker(client))
             tasks.append(task)
+        if app.cloud_drive_config.enable_upload_file:
+            for _ in range(app.max_upload_task):
+                task = app.loop.create_task(upload_worker())
+                tasks.append(task)
 
         if app.bot_token:
             app.loop.run_until_complete(

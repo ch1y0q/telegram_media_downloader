@@ -398,6 +398,7 @@ class Application:
         self.web_host: str = "0.0.0.0"
         self.web_port: int = 5000
         self.max_download_task: int = 5
+        self.max_upload_task: int = 3
         self.language = Language.EN
         self.after_upload_telegram_delete: bool = True
         self.web_login_secret: str = ""
@@ -502,6 +503,7 @@ class Application:
         self.max_download_task = _config.get(
             "max_download_task", self.max_download_task
         )
+        self.max_upload_task = _config.get("max_upload_task", self.max_upload_task)
 
         self.max_concurrent_transmissions = self.max_download_task * 5
 

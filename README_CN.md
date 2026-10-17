@@ -184,6 +184,7 @@ file_name_prefix:
 - file_name
 file_name_prefix_split: ' - '
 max_download_task: 5
+max_upload_task: 3
 web_host: 127.0.0.1
 web_port: 5000
 web_login_secret: 123
@@ -223,6 +224,7 @@ enable_download_txt: false
   - `caption` - 消息的标题（可能为空）
 - **file_name_prefix_split** - 自定义文件名称分割符号，默认为` - `
 - **max_download_task** - 最大任务下载任务个数，默认为5个。
+- **max_upload_task** - 云盘上传并发任务数，默认为3个。下载和上传使用独立队列。
 - **hide_file_name** - 是否隐藏web界面文件名称，默认`false`
 - **web_host** - web界面地址
 - **web_port** - web界面端口
