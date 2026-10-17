@@ -91,6 +91,7 @@ download_queue: asyncio.Queue = asyncio.Queue()
 # Keep the old name for callers that enqueue normal download tasks directly.
 queue = download_queue
 upload_queue: asyncio.Queue = asyncio.Queue()
+upload_queue_condition = asyncio.Condition()
 RETRY_TIME_OUT = 3
 
 logging.getLogger("pyrogram.session.session").addFilter(LogFilter())
@@ -551,6 +552,7 @@ async def worker(client: pyrogram.client.Client):
         item = None
         try:
             item = await queue.get()
+            await _wait_for_upload_queue_capacity()
             message = item[0]
             node: TaskNode = item[1]
 
@@ -568,12 +570,25 @@ async def worker(client: pyrogram.client.Client):
                 queue.task_done()
 
 
+async def _wait_for_upload_queue_capacity():
+    """Pause downloads while completed files are waiting to be uploaded."""
+    queue_limit = app.max_upload_queue_size
+    if queue_limit <= 0:
+        return
+
+    async with upload_queue_condition:
+        while app.is_running and upload_queue.qsize() >= queue_limit:
+            await upload_queue_condition.wait()
+
+
 async def upload_worker():
     """Consume Telegram and cloud upload tasks independently from downloads."""
     while app.is_running:
         item = None
         try:
             item = await upload_queue.get()
+            async with upload_queue_condition:
+                upload_queue_condition.notify_all()
             client, message, node, download_status, file_name, file_size = item
             await upload_telegram_chat(
                 client,
