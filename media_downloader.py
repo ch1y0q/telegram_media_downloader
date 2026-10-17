@@ -356,35 +356,18 @@ async def download_task(
 
     file_size = os.path.getsize(file_name) if file_name else 0
 
-    await upload_telegram_chat(
-        client,
-        node.upload_user if node.upload_user else client,
-        app,
-        node,
-        message,
-        download_status,
-        file_name,
-    )
-
-    # Cloud uploads run independently from download workers.
-    if (
-        not node.upload_telegram_chat_id
-        and download_status is DownloadStatus.SuccessDownload
-        and app.cloud_drive_config.enable_upload_file
-    ):
-        ui_file_name = file_name
-        if app.hide_file_name:
-            ui_file_name = f"****{os.path.splitext(file_name)[-1]}"
-        await upload_queue.put((file_name, node, message.id, ui_file_name))
-
     if not node.bot:
         app.set_download_id(node, message.id, download_status)
 
-    await report_bot_download_status(
-        node.bot,
-        node,
-        download_status,
-        file_size,
+    await upload_queue.put(
+        (
+            client,
+            message,
+            node,
+            download_status,
+            file_name,
+            file_size,
+        )
     )
 
 
@@ -586,18 +569,43 @@ async def worker(client: pyrogram.client.Client):
 
 
 async def upload_worker():
-    """Consume cloud upload tasks independently from download tasks."""
+    """Consume Telegram and cloud upload tasks independently from downloads."""
     while app.is_running:
         item = None
         try:
             item = await upload_queue.get()
-            file_name, node, message_id, ui_file_name = item
-            if await app.upload_file(
+            client, message, node, download_status, file_name, file_size = item
+            await upload_telegram_chat(
+                client,
+                node.upload_user if node.upload_user else client,
+                app,
+                node,
+                message,
+                download_status,
                 file_name,
-                update_cloud_upload_stat,
-                (node, message_id, ui_file_name),
+            )
+
+            if (
+                not node.upload_telegram_chat_id
+                and download_status is DownloadStatus.SuccessDownload
+                and app.cloud_drive_config.enable_upload_file
             ):
-                node.upload_success_count += 1
+                ui_file_name = file_name
+                if app.hide_file_name:
+                    ui_file_name = f"****{os.path.splitext(file_name)[-1]}"
+                if await app.upload_file(
+                    file_name,
+                    update_cloud_upload_stat,
+                    (node, message.id, ui_file_name),
+                ):
+                    node.upload_success_count += 1
+
+            await report_bot_download_status(
+                node.bot,
+                node,
+                download_status,
+                file_size,
+            )
         except Exception as e:
             logger.exception(f"{e}")
         finally:
@@ -631,32 +639,19 @@ async def _process_chat_message_for_download(
         return
 
     if force_download or app.exec_filter(chat_download_config, meta_data):
-        if sequential:
-            if message.empty:
-                return
-            node.download_status[message.id] = DownloadStatus.Downloading
-            node.total_task += 1
-            try:
-                if node.client:
-                    await download_task(node.client, message, node)
-                else:
-                    await download_task(client, message, node)
-            except Exception as err:
-                logger.exception(f"{err}")
-                node.download_status[message.id] = DownloadStatus.FailedDownload
-                await report_bot_download_status(node.bot, node, DownloadStatus.FailedDownload)
-        else:
-            await add_download_task(message, node)
+        await add_download_task(message, node)
     else:
         node.download_status[message.id] = DownloadStatus.SkipDownload
         if message.media_group_id:
-            await upload_telegram_chat(
-                client,
-                node.upload_user,
-                app,
-                node,
-                message,
-                DownloadStatus.SkipDownload,
+            await upload_queue.put(
+                (
+                    client,
+                    message,
+                    node,
+                    DownloadStatus.SkipDownload,
+                    None,
+                    0,
+                )
             )
 
 
@@ -705,7 +700,7 @@ async def download_chat_task_sequential(
     chat_download_config: ChatDownloadConfig,
     node: TaskNode,
 ):
-    """Download/forward all messages sequentially to keep disk footprint low."""
+    """Download protected messages using the normal concurrent download queue."""
     messages_iter = get_chat_history_v2(
         client,
         node.chat_id,
@@ -813,10 +808,9 @@ def main():
         for _ in range(app.max_download_task):
             task = app.loop.create_task(worker(client))
             tasks.append(task)
-        if app.cloud_drive_config.enable_upload_file:
-            for _ in range(app.max_upload_task):
-                task = app.loop.create_task(upload_worker())
-                tasks.append(task)
+        for _ in range(app.max_upload_task):
+            task = app.loop.create_task(upload_worker())
+            tasks.append(task)
 
         if app.bot_token:
             app.loop.run_until_complete(
