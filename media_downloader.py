@@ -445,7 +445,7 @@ async def download_media(
                             f"{_t('already download,download skipped')}.\n"
                         )
 
-                        return DownloadStatus.SkipDownload, None
+                        return DownloadStatus.SkipDownload, file_name
             else:
                 return DownloadStatus.SkipDownload, None
 
@@ -583,6 +583,7 @@ async def upload_worker():
                 message,
                 download_status,
                 file_name,
+                download_status is DownloadStatus.SuccessDownload,
             )
 
             if (

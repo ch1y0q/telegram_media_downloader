@@ -289,17 +289,23 @@ async def upload_telegram_chat(
     message: pyrogram.types.Message,
     download_status: DownloadStatus,
     file_name: str = None,
+    delete_file: bool = True,
 ):
     """Upload telegram chat"""
     # upload telegram
     if node.upload_telegram_chat_id:
-        if download_status is DownloadStatus.SkipDownload and message.media:
+        if (
+            download_status is DownloadStatus.SkipDownload
+            and message.media
+            and not file_name
+        ):
             if message.media_group_id:
                 await proc_cache_forward(client, node, message, True, app)
             return
 
         if download_status is DownloadStatus.SuccessDownload or (
-            download_status is DownloadStatus.SkipDownload and not message.media
+            download_status is DownloadStatus.SkipDownload
+            and (file_name or not message.media)
         ):
             try:
                 await upload_telegram_chat_message(
@@ -313,7 +319,7 @@ async def upload_telegram_chat(
             except Exception as e:
                 logger.exception(f"Upload file {file_name} error: {e}")
             finally:
-                if file_name and app.after_upload_telegram_delete:
+                if file_name and delete_file and app.after_upload_telegram_delete:
                     os.remove(file_name)
 
             # forward text

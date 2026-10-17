@@ -993,7 +993,15 @@ class MediaDownloaderTestCase(unittest.TestCase):
             )
         )
 
-        self.assertEqual(res, (DownloadStatus.SkipDownload, None))
+        self.assertEqual(
+            res,
+            (
+                DownloadStatus.SkipDownload,
+                platform_generic_path(
+                    "/root/project/-123/0/313 - sucess_exist_down.mp4"
+                ),
+            ),
+        )
 
     @mock.patch("media_downloader.HookClient", new=MockClient)
     @mock.patch("media_downloader.RETRY_TIME_OUT", new=1)
