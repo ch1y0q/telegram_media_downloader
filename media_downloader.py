@@ -598,7 +598,8 @@ async def upload_worker():
                 message,
                 download_status,
                 file_name,
-                download_status is DownloadStatus.SuccessDownload,
+                download_status is DownloadStatus.SuccessDownload
+                or node.delete_skipped_file_after_upload,
             )
 
             if (
@@ -717,6 +718,7 @@ async def download_chat_task_sequential(
     node: TaskNode,
 ):
     """Download protected messages using the normal concurrent download queue."""
+    node.delete_skipped_file_after_upload = True
     messages_iter = get_chat_history_v2(
         client,
         node.chat_id,

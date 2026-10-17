@@ -166,6 +166,7 @@ class TaskNode:
         self.is_running: bool = False
         self.client = None
         self.upload_success_count: int = 0
+        self.delete_skipped_file_after_upload: bool = False
         self.is_stop_transmission = False
         self.media_group_ids: dict = {}
         self.media_group_ids_lock: Lock = Lock()
