@@ -300,7 +300,23 @@ async def upload_telegram_chat(
             and not file_name
         ):
             if message.media_group_id:
-                await proc_cache_forward(client, node, message, True, app)
+                forward_status = await proc_cache_forward(
+                    client, node, message, True, app
+                )
+                logger.info(
+                    "Forward finished from media-group cache: message_id={}, "
+                    "target_chat_id={}, status={}",
+                    message.id,
+                    node.upload_telegram_chat_id,
+                    forward_status.name,
+                )
+            else:
+                logger.info(
+                    "Forward skipped: message_id={}, target_chat_id={}, "
+                    "reason=download skipped and no local file",
+                    message.id,
+                    node.upload_telegram_chat_id,
+                )
             return
 
         if download_status is DownloadStatus.SuccessDownload or (
@@ -317,7 +333,15 @@ async def upload_telegram_chat(
                     file_name,
                 )
             except Exception as e:
-                logger.exception(f"Upload file {file_name} error: {e}")
+                logger.exception(
+                    "Forward pipeline failed: message_id={}, target_chat_id={}, "
+                    "file={}, exception_type={}, error={}",
+                    message.id,
+                    node.upload_telegram_chat_id,
+                    file_name or "<message>",
+                    type(e).__name__,
+                    e,
+                )
             finally:
                 if file_name and delete_file and app.after_upload_telegram_delete:
                     os.remove(file_name)
@@ -343,25 +367,79 @@ async def upload_telegram_chat_message(
     file_name: str = None,
 ) -> ForwardStatus:
     """See upload telegram_chat"""
+    file_size = os.path.getsize(file_name) if file_name and os.path.exists(file_name) else 0
+    size_text = format_byte(file_size) if file_size else "unknown size"
+    logger.info(
+        "Forward started: message_id={}, target_chat_id={}, file={}, size={}",
+        message.id,
+        node.upload_telegram_chat_id,
+        file_name or "<message>",
+        size_text,
+    )
     forward_status = ForwardStatus.FailedForward
     max_attempts = 3
-    for _ in range(1, max_attempts + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
             forward_status = await _upload_telegram_chat_message(
                 client, upload_user, app, node, message, file_name
+            )
+            logger.info(
+                "Forward finished: message_id={}, target_chat_id={}, status={}, "
+                "file={}, size={}",
+                message.id,
+                node.upload_telegram_chat_id,
+                forward_status.name,
+                file_name or "<message>",
+                size_text,
             )
             break
         except pyrogram.errors.exceptions.flood_420.FloodWait as wait_err:
             await asyncio.sleep(wait_err.value * 2)
             logger.warning(
-                "Upload Message[{}]: FlowWait {}", message.id, wait_err.value
+                "Forward delayed by FloodWait: message_id={}, attempt={}/{}, "
+                "wait_seconds={}",
+                message.id,
+                attempt,
+                max_attempts,
+                wait_err.value,
             )
         except Exception as e:
-            logger.exception(f"Upload file {file_name} error: {e}")
+            if file_size > 2 * 1024**3:
+                logger.error(
+                    "Forward failed because the file may exceed Telegram's "
+                    "2 GiB upload limit: message_id={}, target_chat_id={}, "
+                    "file={}, size={}, exception_type={}, error={}",
+                    message.id,
+                    node.upload_telegram_chat_id,
+                    file_name or "<message>",
+                    size_text,
+                    type(e).__name__,
+                    e,
+                )
+            else:
+                logger.exception(
+                    "Forward failed: message_id={}, target_chat_id={}, "
+                    "file={}, size={}, exception_type={}, error={}",
+                    message.id,
+                    node.upload_telegram_chat_id,
+                    file_name or "<message>",
+                    size_text,
+                    type(e).__name__,
+                    e,
+                )
             return ForwardStatus.FailedForward
 
     if forward_status != ForwardStatus.CacheForward:
         node.stat_forward(forward_status)
+    if forward_status is ForwardStatus.FailedForward:
+        logger.error(
+            "Forward failed after retries: message_id={}, target_chat_id={}, "
+            "file={}, size={}",
+            message.id,
+            node.upload_telegram_chat_id,
+            file_name or "<message>",
+            size_text,
+        )
     return forward_status
 
 
