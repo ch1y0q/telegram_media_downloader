@@ -393,7 +393,10 @@ async def upload_telegram_chat_message(
                 size_text,
             )
             break
-        except pyrogram.errors.exceptions.flood_420.FloodWait as wait_err:
+        except (
+            pyrogram.errors.exceptions.flood_420.FloodWait,
+            pyrogram.errors.exceptions.flood_420.FloodPremiumWait,
+        ) as wait_err:
             await asyncio.sleep(wait_err.value * 2)
             logger.warning(
                 "Forward delayed by FloodWait: message_id={}, attempt={}/{}, "
@@ -1313,7 +1316,10 @@ async def retry(func: Callable, args: tuple = (), max_attempts=3, wait_second=15
     for _ in range(1, max_attempts + 1):
         try:
             return await func(*args)
-        except pyrogram.errors.exceptions.flood_420.FloodWait as wait_err:
+        except (
+            pyrogram.errors.exceptions.flood_420.FloodWait,
+            pyrogram.errors.exceptions.flood_420.FloodPremiumWait,
+        ) as wait_err:
             logger.warning("bad call retry: FlowWait {}", wait_err.value)
             await asyncio.sleep(wait_err.value)
         except Exception as e:

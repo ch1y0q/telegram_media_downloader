@@ -496,7 +496,10 @@ async def download_media(
                     f"Message[{message.id}]: "
                     f"{_t('file reference expired for 3 retries, download skipped.')}"
                 )
-        except pyrogram.errors.exceptions.flood_420.FloodWait as wait_err:
+        except (
+            pyrogram.errors.exceptions.flood_420.FloodWait,
+            pyrogram.errors.exceptions.flood_420.FloodPremiumWait,
+        ) as wait_err:
             await asyncio.sleep(wait_err.value)
             logger.warning("Message[{}]: FlowWait {}", message.id, wait_err.value)
             _check_timeout(retry, message.id)
@@ -812,6 +815,9 @@ def main():
         workdir=app.session_file_path,
         start_timeout=app.start_timeout,
         no_updates=True,
+        # 自动等待 Telegram 限流（FloodWait/FloodPremiumWait），默认阈值只有 10s，
+        # 超过就会直接抛错；sleep_threshold 内会自动 sleep 后重试
+        sleep_threshold=60,
     )
     try:
         app.pre_run()
