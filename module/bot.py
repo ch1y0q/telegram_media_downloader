@@ -150,6 +150,9 @@ class DownloadBot:
             bot_token=app.bot_token,
             workdir=app.session_file_path,
             proxy=app.proxy,
+            # /forward_sequence 等指令会用 bot client 上传文件，
+            # 默认 sleep_threshold=10s 会导致限流直接抛错，这里与主 client 保持一致
+            sleep_threshold=60,
         )
 
         # Command list
