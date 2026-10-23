@@ -3,7 +3,9 @@
 import asyncio
 import html
 import os
+import re
 import secrets
+import shutil
 import struct
 import time
 from copy import deepcopy
@@ -1668,3 +1670,85 @@ async def forward_messages(
         )
 
     return types.List(forwarded_messages) if is_iterable else forwarded_messages[0]
+
+
+class MediaSizeMismatchError(Exception):
+    """Raised when a media download ends with fewer bytes than expected.
+
+    The pyrogram fork swallows every non-FloodWait exception inside
+    ``Client.get_file``, so a dropped connection silently truncates the
+    download instead of raising. Size validation is the only way to notice.
+    """
+
+
+_original_client_get_file = pyrogram.Client.get_file
+_original_client_handle_download = pyrogram.Client.handle_download
+
+
+# pylint: disable=R0913
+async def _strict_get_file(
+    self,
+    file_id,
+    file_size: int = 0,
+    limit: int = 0,
+    offset: int = 0,
+    progress: Callable = None,
+    progress_args: tuple = (),
+):
+    """Wrap ``Client.get_file`` so silent truncation raises instead of
+    producing an empty/partial file.
+
+    Only full downloads (``limit == 0 and offset == 0``, the shape
+    ``handle_download`` calls with) are validated; ``stream_media`` reads
+    partial ranges through the same method and must keep working.
+    """
+    received = 0
+    async for chunk in _original_client_get_file(
+        self, file_id, file_size, limit, offset, progress, progress_args
+    ):
+        received += len(chunk)
+        yield chunk
+
+    if file_size and limit == 0 and offset == 0 and received < file_size:
+        raise MediaSizeMismatchError(f"downloaded {received} of {file_size} bytes")
+
+
+async def _strict_handle_download(self, packet):
+    """``Client.handle_download`` that re-raises instead of returning None.
+
+    The original removes the temp file, then swallows the exception so the
+    caller sees a "successful" empty/partial download. Keep the cleanup but
+    re-raise, so network failures reach the caller's retry logic.
+    """
+    file_id, directory, file_name, in_memory, file_size, progress, progress_args = (
+        packet
+    )
+
+    os.makedirs(directory, exist_ok=True) if not in_memory else None
+    temp_file_path = os.path.abspath(
+        re.sub("\\\\", "/", os.path.join(directory, file_name))
+    ) + ".temp"
+    file = BytesIO() if in_memory else open(temp_file_path, "wb")
+
+    try:
+        async for chunk in self.get_file(
+            file_id, file_size, 0, 0, progress, progress_args
+        ):
+            file.write(chunk)
+    except BaseException:
+        if not in_memory:
+            file.close()
+            os.remove(temp_file_path)
+        raise
+    else:
+        if in_memory:
+            file.name = file_name
+            return file
+        file.close()
+        file_path = os.path.splitext(temp_file_path)[0]
+        shutil.move(temp_file_path, file_path)
+        return file_path
+
+
+pyrogram.Client.get_file = _strict_get_file
+pyrogram.Client.handle_download = _strict_handle_download

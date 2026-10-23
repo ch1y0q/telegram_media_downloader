@@ -60,6 +60,7 @@ from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import _t
 from module.pyrogram_extension import (
     HookClient,
+    MediaSizeMismatchError,
     fetch_message,
     get_extension,
     record_download_status,
@@ -123,7 +124,7 @@ def _check_download_finish(media_size: int, download_path: str, ui_file_name: st
             f"{media_size}, {_t('file name')}: {ui_file_name}"
         )
         os.remove(download_path)
-        raise pyrogram.errors.exceptions.bad_request_400.BadRequest()
+        raise MediaSizeMismatchError(f"expected {media_size} bytes, got {download_size}")
 
 
 def _move_to_download_path(temp_download_path: str, download_path: str):
@@ -484,6 +485,21 @@ async def download_media(
                 _move_to_download_path(temp_download_path, file_name)
                 # TODO: if not exist file size or media
                 return DownloadStatus.SuccessDownload, file_name
+        except MediaSizeMismatchError as mismatch_err:
+            # fork 的 get_file 会吞掉断线等异常,只留下被截断的文件;
+            # 真实原因通常是网络断连,也可能是 file reference 过期,
+            # 所以按指数退避重试并 refetch 消息
+            logger.warning(
+                f"Message[{message.id}]: incomplete download "
+                f"({mismatch_err}), refetching..."
+            )
+            await asyncio.sleep(RETRY_TIME_OUT * (2**retry))
+            message = await fetch_message(client, message)
+            if _check_timeout(retry, message.id):
+                logger.error(
+                    f"Message[{message.id}]: "
+                    f"incomplete download for 3 retries, download skipped."
+                )
         except pyrogram.errors.exceptions.bad_request_400.BadRequest:
             logger.warning(
                 f"Message[{message.id}]: {_t('file reference expired, refetching')}..."
