@@ -98,34 +98,66 @@ async def cache_media(
     elif isinstance(media_obj, types.InputMediaVideo):
         if isinstance(media_obj.media, str):
             if os.path.isfile(media_obj.media):
-                media = await client.invoke(
-                    raw.functions.messages.UploadMedia(
-                        peer=await client.resolve_peer(chat_id),
-                        media=raw.types.InputMediaUploadedDocument(
-                            file=await client.save_file(
-                                media_obj.media,
-                                progress=progress,
-                                progress_args=progress_args,
+                file_handle = await client.save_file(
+                    media_obj.media,
+                    progress=progress,
+                    progress_args=progress_args,
+                )
+                try:
+                    media = await client.invoke(
+                        raw.functions.messages.UploadMedia(
+                            peer=await client.resolve_peer(chat_id),
+                            media=raw.types.InputMediaUploadedDocument(
+                                file=file_handle,
+                                thumb=await client.save_file(media_obj.thumb),
+                                mime_type=client.guess_mime_type(media_obj.media)
+                                or "video/mp4",
+                                nosound_video=True,
+                                attributes=[
+                                    raw.types.DocumentAttributeVideo(
+                                        supports_streaming=media_obj.supports_streaming
+                                        or None,
+                                        duration=media_obj.duration,
+                                        w=media_obj.width,
+                                        h=media_obj.height,
+                                    ),
+                                    raw.types.DocumentAttributeFilename(
+                                        file_name=os.path.basename(media_obj.media)
+                                    ),
+                                ],
                             ),
-                            thumb=await client.save_file(media_obj.thumb),
-                            mime_type=client.guess_mime_type(media_obj.media)
-                            or "video/mp4",
-                            nosound_video=True,
-                            attributes=[
-                                raw.types.DocumentAttributeVideo(
-                                    supports_streaming=media_obj.supports_streaming
-                                    or None,
-                                    duration=media_obj.duration,
-                                    w=media_obj.width,
-                                    h=media_obj.height,
-                                ),
-                                raw.types.DocumentAttributeFilename(
-                                    file_name=os.path.basename(media_obj.media)
-                                ),
-                            ],
                         ),
                     )
-                )
+                except pyrogram.errors.exceptions.bad_request_400.FilePartMissing:
+                    # FILE_PART_X_MISSING: 存储侧丢失部分分片,重新完整上传一次
+                    logging.getLogger(__name__).warning(
+                        "FILE_PART missing on upload, re-uploading %s",
+                        media_obj.media,
+                    )
+                    media = await client.invoke(
+                        raw.functions.messages.UploadMedia(
+                            peer=await client.resolve_peer(chat_id),
+                            media=raw.types.InputMediaUploadedDocument(
+                                file=await client.save_file(media_obj.media),
+                                thumb=await client.save_file(media_obj.thumb),
+                                mime_type=client.guess_mime_type(media_obj.media)
+                                or "video/mp4",
+                                nosound_video=True,
+                                attributes=[
+                                    raw.types.DocumentAttributeVideo(
+                                        supports_streaming=media_obj.supports_streaming
+                                        or None,
+                                        duration=media_obj.duration,
+                                        w=media_obj.width,
+                                        h=media_obj.height,
+                                    ),
+                                    raw.types.DocumentAttributeFilename(
+                                        file_name=os.path.basename(media_obj.media)
+                                    ),
+                                ],
+                            ),
+                        ),
+                    )
 
                 media = raw.types.InputMediaDocument(
                     id=raw.types.InputDocument(
