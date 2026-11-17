@@ -1041,6 +1041,13 @@ class Application:
 
         self.chat_download_config[node.chat_id].finish_task += 1
 
+        # 失败的消息记入 ids_to_retry(update_config 会持久化到 data.yaml,
+        # 下次启动经 download_chat_task 的 ids_to_retry 分支自动补下)
+        if download_status is DownloadStatus.FailedDownload:
+            retry_ids = self.chat_download_config[node.chat_id].ids_to_retry
+            if message_id not in retry_ids:
+                retry_ids.append(message_id)
+
         self.chat_download_config[node.chat_id].last_read_message_id = max(
             self.chat_download_config[node.chat_id].last_read_message_id, message_id
         )
