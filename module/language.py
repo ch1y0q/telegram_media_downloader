@@ -297,6 +297,26 @@ translations = {
         "Установить рекламу",
         "Встановити рекламу",
     ],
+    "Invalid command format. Please use /add_ad filter": [
+        "命令格式错误。请使用 /add_ad filter", "", "",
+    ],
+    "Invalid command format. Please use /add_replace_ad your filter": [
+        "命令格式错误。请使用 /add_replace_ad your filter", "", "",
+    ],
+    "Invalid command format. Please use /remove_ad filter": [
+        "命令格式错误。请使用 /remove_ad filter", "", "",
+    ],
+    "Invalid command format. Please use /set_ad mesage_link advertisement": [
+        "命令格式错误。请使用 /set_ad mesage_link advertisement", "", "",
+    ],
+    "Invalid command format. Please use /get_info group_message_link": [
+        "命令格式错误。请使用 /get_info group_message_link", "", "",
+    ],
+    "Please select:": ["请选择:", "", ""],
+    "Stop Download": ["停止下载", "", ""],
+    "Stop Forward": ["停止转发", "", ""],
+    "Stop Listen Forward": ["停止监听转发", "", ""],
+    "all": ["全部", "", ""],
 }
 
 

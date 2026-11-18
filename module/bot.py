@@ -54,7 +54,7 @@ class DownloadBot:
         self.download_chat_task_sequential: Callable = None
         self.app = None
         self.listen_forward_chat: dict = {}
-        self.id_mode: bool = False
+        self.user_context: dict = {}  # uid(str) -> {"mode","dst","await_dst"}
         self.config: dict = {}
         self._yaml = yaml.YAML()
         self.config_path = os.path.join(os.path.abspath("."), "bot.yaml")
@@ -125,15 +125,48 @@ class DownloadBot:
         """
 
         self.download_filter = _config.get("download_filter", self.download_filter)
+        self.user_context = _config.get("user_context", self.user_context)
 
         return True
 
     def update_config(self):
         """Update config from str."""
         self.config["download_filter"] = self.download_filter
+        self.config["user_context"] = self.user_context
 
         with open("d", "w", encoding="utf-8") as yaml_file:
             self._yaml.dump(self.config, yaml_file)
+
+    def get_user_ctx(self, uid: int) -> dict:
+        """每个用户的交互上下文:模式/锁定目的地/待设置标记(持久化到 bot 存储)。"""
+        ctx = self.user_context.get(str(uid))
+        if ctx is None:
+            ctx = {"mode": "download", "dst": None, "await_dst": False}
+            self.user_context[str(uid)] = ctx
+            self.update_config()
+        return ctx
+
+    def ux_menu_markup(self, uid: int):
+        """主控制面板的 inline 键盘。"""
+        ctx = self.get_user_ctx(uid)
+        mode_btn = (
+            "🆔 模式: ID(转发回来源)" if ctx["mode"] == "id" else "📥 模式: 下载"
+        )
+        dst = ctx.get("dst")
+        if dst is None:
+            dst_btn = "🎯 目的地: 未设置"
+        elif dst["type"] == "disk":
+            dst_btn = "🎯 目的地: 💾 本机磁盘"
+        else:
+            dst_btn = f"🎯 目的地: {dst.get('title', dst.get('id'))}"
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(mode_btn, callback_data="ux:mode")],
+                [InlineKeyboardButton(dst_btn, callback_data="ux:dst")],
+                [InlineKeyboardButton("🚫 解除目的地锁定", callback_data="ux:dst_clear")],
+                [InlineKeyboardButton("📖 帮助", callback_data="ux:help")],
+            ]
+        )
 
     async def start(
         self,
@@ -162,6 +195,7 @@ class DownloadBot:
             types.BotCommand(
                 "get_info", _t("Get group and user info from message link")
             ),
+            types.BotCommand("menu", "Open the control panel"),
             types.BotCommand("id", "Toggle ID mode (forward msg to get source ids)"),
             types.BotCommand(
                 "download",
@@ -264,6 +298,35 @@ class DownloadBot:
             MessageHandler(
                 set_listen_forward_msg,
                 filters=pyrogram.filters.command(["listen_forward"])
+                & pyrogram.filters.user(self.allowed_user_ids),
+            )
+        )
+        self.bot.add_handler(
+            MessageHandler(
+                ux_menu_command,
+                filters=pyrogram.filters.command(["menu", "start"])
+                & pyrogram.filters.user(self.allowed_user_ids),
+            )
+        )
+        self.bot.add_handler(
+            MessageHandler(
+                toggle_id_mode,
+                filters=pyrogram.filters.command(["id"])
+                & pyrogram.filters.user(self.allowed_user_ids),
+            )
+        )
+        self.bot.add_handler(
+            MessageHandler(
+                forward_ids_text,
+                filters=pyrogram.filters.text
+                & pyrogram.filters.private
+                & pyrogram.filters.user(self.allowed_user_ids),
+            )
+        )
+        self.bot.add_handler(
+            CallbackQueryHandler(
+                on_ux_callback,
+                filters=pyrogram.filters.regex(r"^ux:")
                 & pyrogram.filters.user(self.allowed_user_ids),
             )
         )
@@ -490,6 +553,7 @@ async def set_language(client: pyrogram.Client, message: pyrogram.types.Message)
     try:
         language = Language[language.upper()]
         _bot.app.set_language(language)
+        _bot.app.update_config()  # 持久化语言,重启不回退
         await client.send_message(
             message.from_user.id, f"{_t('Language set to')} {language.name}"
         )
@@ -929,28 +993,122 @@ def format_forward_ids(message: pyrogram.types.Message) -> str:
 async def toggle_id_mode(
     client: pyrogram.Client, message: pyrogram.types.Message
 ):
-    """切换 ID 模式:开启后,转发给 bot 的消息回复来源 id 而不是下载。"""
-    _bot.id_mode = not _bot.id_mode
-    if _bot.id_mode:
+    """切换当前用户的交互模式(下载 / ID),也可用主菜单按钮切换。"""
+    ctx = _bot.get_user_ctx(message.from_user.id)
+    ctx["mode"] = "id" if ctx["mode"] == "download" else "download"
+    _bot.update_config()
+    if ctx["mode"] == "id":
         reply = (
             "ID 模式: ON\n"
-            "现在把任意消息转发给我,我会回复来源(频道/群/个人)的 id 与消息 id。\n"
-            "再次发送 /id 关闭,恢复转发即下载。"
+            "现在转发任意消息给我,我会回复来源(频道/群/个人)的 id 与消息 id。\n"
+            "再发 /id 或点菜单按钮切回下载模式。"
         )
     else:
-        reply = "ID 模式: OFF\n转发消息已恢复为直接下载。"
-    await client.send_message(message.from_user.id, reply)
+        reply = (
+            "模式: 下载\n"
+            "转发媒体给我将按目的地设置处理(未锁定目的地则下载到服务器磁盘)。"
+        )
+    await client.send_message(
+        message.from_user.id, reply, reply_markup=_bot.ux_menu_markup(message.from_user.id)
+    )
 
 
 async def forward_ids_text(
     client: pyrogram.Client, message: pyrogram.types.Message
 ):
-    """ID 模式开启时,转发来的纯文本消息(如频道公告)也回复来源 id。"""
-    if not _bot.id_mode:
+    """私聊文本处理:目的地设置捕获 / ID 模式报告 / 取消。"""
+    uid = message.from_user.id
+    ctx = _bot.get_user_ctx(uid)
+    text = (message.text or "").strip()
+
+    if ctx.get("await_dst"):
+        low = text.lower()
+        if low in ("/cancel", "取消"):
+            ctx["await_dst"] = False
+            _bot.update_config()
+            await client.send_message(uid, "已取消目的地设置。")
+            return
+        if low in ("本机", "disk", "本机磁盘"):
+            ctx["dst"] = {"type": "disk", "title": "本机磁盘"}
+        else:
+            try:
+                chat = await _bot.client.get_chat(text)
+                title = getattr(chat, "title", None) or getattr(
+                    chat, "first_name", "?"
+                )
+                ctx["dst"] = {
+                    "type": "chat",
+                    "id": chat.id,
+                    "title": title,
+                    "username": getattr(chat, "username", None),
+                }
+            except Exception as e:
+                await client.send_message(
+                    uid,
+                    f"目的地验证失败: {e}\n请重新发送频道/群链接或 id,或 /cancel 取消。",
+                )
+                return
+        ctx["await_dst"] = False
+        _bot.update_config()
+        await client.send_message(
+            uid,
+            f"目的地已锁定: {ctx['dst'].get('title')}\n"
+            "之后转发的媒体将按该目的地处理。控制面板:",
+            reply_markup=_bot.ux_menu_markup(uid),
+        )
+        return
+
+    if ctx["mode"] != "id":
         return
     if getattr(message, "forward_date", None) is None:
         return  # 手打的文本/命令,不是转发
-    await client.send_message(message.from_user.id, format_forward_ids(message))
+    await client.send_message(uid, format_forward_ids(message))
+
+
+async def on_ux_callback(
+    client: pyrogram.Client, query: pyrogram.types.CallbackQuery
+):
+    """主控制面板按钮回调(ux: 前缀)。"""
+    uid = query.from_user.id
+    ctx = _bot.get_user_ctx(uid)
+    data = query.data or ""
+    if data == "ux:mode":
+        ctx["mode"] = "id" if ctx["mode"] == "download" else "download"
+        _bot.update_config()
+        await query.answer(f"模式: {ctx['mode']}", show_alert=False)
+    elif data == "ux:dst":
+        ctx["await_dst"] = True
+        _bot.update_config()
+        await query.answer()
+        await client.send_message(
+            uid,
+            "请发送目的地:频道/群的链接或 id(如 -100xxxx 或 @xxx);\n"
+            "发送【本机】表示下载到服务器磁盘;发送 /cancel 取消。",
+        )
+        return
+    elif data == "ux:dst_clear":
+        ctx["dst"] = None
+        ctx["await_dst"] = False
+        _bot.update_config()
+        await query.answer("已解除目的地锁定")
+    elif data == "ux:help":
+        await query.answer()
+        await client.send_message(uid, await send_help_str(client, uid))
+        return
+    try:
+        await query.edit_message_reply_markup(reply_markup=_bot.ux_menu_markup(uid))
+    except Exception:
+        pass
+
+
+async def ux_menu_command(
+    client: pyrogram.Client, message: pyrogram.types.Message
+):
+    """主控制面板。"""
+    uid = message.from_user.id
+    await client.send_message(
+        uid, "🎛 控制面板:", reply_markup=_bot.ux_menu_markup(uid)
+    )
 
 
 async def download_forward_media(
@@ -966,12 +1124,28 @@ async def download_forward_media(
     Returns:
         None
     """
-    if _bot.id_mode:
-        await client.send_message(message.from_user.id, format_forward_ids(message))
+    uid = message.from_user.id
+    ctx = _bot.get_user_ctx(uid)
+
+    if ctx["mode"] == "id":
+        await client.send_message(uid, format_forward_ids(message))
+        return
+
+    dst = ctx.get("dst")
+    if dst and dst.get("type") == "chat":
+        try:
+            await _bot.bot.forward_messages(dst["id"], message.chat.id, message.id)
+            await client.send_message(uid, f"已转发到 {dst.get('title')} ✓")
+        except Exception as e:
+            await client.send_message(
+                uid, f"转发到目的地失败: {e}\n已改走下载流程。"
+            )
+            if message.media and getattr(message, message.media.value):
+                await direct_download(_bot, uid, message, message, client)
         return
 
     if message.media and getattr(message, message.media.value):
-        await direct_download(_bot, message.from_user.id, message, message, client)
+        await direct_download(_bot, uid, message, message, client)
         return
 
     await client.send_message(
