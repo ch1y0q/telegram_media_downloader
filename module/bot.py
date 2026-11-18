@@ -881,7 +881,7 @@ async def direct_download(
     node.is_running = True
 
 
-async def format_forward_ids(message: pyrogram.types.Message) -> str:
+def format_forward_ids(message: pyrogram.types.Message) -> str:
     """解析转发的消息来源,输出对面的 chat id 与消息 id。
 
     本 fork 的 pyrogram 是旧 layer:转发信息在 forward_from_chat /
