@@ -844,9 +844,13 @@ def main():
         app.loop.run_until_complete(start_server(client))
         logger.success(_t("Successfully started (Press Ctrl+C to stop)"))
 
-        # 预热会话实体缓存:新 session 首次按 chat_id 取历史会触发 PEER_ID_INVALID,
-        # 迭代一遍 dialog 列表把 peer 写进缓存即可
-        app.loop.run_until_complete(client.get_dialogs())
+        # 预热会话实体缓存:新 session 首次按 chat_id 取历史会触发 PEER_ID_INVALID。
+        # pyrogram 2.x 的 get_dialogs 是异步生成器,必须逐个消费而不是 await。
+        async def _warm_peer_cache():
+            async for _ in client.get_dialogs():
+                pass
+
+        app.loop.run_until_complete(_warm_peer_cache())
 
         app.loop.create_task(download_all_chat(client))
         for _ in range(app.max_download_task):
