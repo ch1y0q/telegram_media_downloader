@@ -54,6 +54,7 @@ class DownloadBot:
         self.download_chat_task_sequential: Callable = None
         self.app = None
         self.listen_forward_chat: dict = {}
+        self.id_mode: bool = False
         self.config: dict = {}
         self._yaml = yaml.YAML()
         self.config_path = os.path.join(os.path.abspath("."), "bot.yaml")
@@ -161,6 +162,7 @@ class DownloadBot:
             types.BotCommand(
                 "get_info", _t("Get group and user info from message link")
             ),
+            types.BotCommand("id", "Toggle ID mode (forward msg to get source ids)"),
             types.BotCommand(
                 "download",
                 _t(
@@ -262,6 +264,21 @@ class DownloadBot:
             MessageHandler(
                 set_listen_forward_msg,
                 filters=pyrogram.filters.command(["listen_forward"])
+                & pyrogram.filters.user(self.allowed_user_ids),
+            )
+        )
+        self.bot.add_handler(
+            MessageHandler(
+                toggle_id_mode,
+                filters=pyrogram.filters.command(["id"])
+                & pyrogram.filters.user(self.allowed_user_ids),
+            )
+        )
+        self.bot.add_handler(
+            MessageHandler(
+                forward_ids_text,
+                filters=pyrogram.filters.text
+                & pyrogram.filters.private
                 & pyrogram.filters.user(self.allowed_user_ids),
             )
         )
@@ -413,6 +430,7 @@ async def send_help_str(client: pyrogram.Client, chat_id):
         f"{_t('Available commands:')}\n"
         f"/help - {_t('Show available commands')}\n"
         f"/get_info - {_t('Get group and user info from message link')}\n"
+        f"/id - Toggle ID mode (forward a message to me to get its source ids)\n"
         f"/download - {_t('Download messages')}\n"
         f"/forward - {_t('Forward messages')}\n"
         f"/forward_sequential - {_t('Forward protected messages sequentially')}\n"
@@ -863,6 +881,66 @@ async def direct_download(
     node.is_running = True
 
 
+async def format_forward_ids(message: pyrogram.types.Message) -> str:
+    """解析转发的消息来源,输出对面的 chat id 与消息 id。"""
+    lines = []
+    origin = message.forward_origin
+    if origin is None:
+        return "这不是带转发来源的消息(或来源被 Telegram 抹除),无法解析 id。"
+    if isinstance(origin, pyrogram.types.MessageForwardOriginChannel):
+        chat = origin.chat
+        raw_id = chat.id
+        cid = f"-100{raw_id}"
+        lines.append(f"来源频道: {chat.title}")
+        if getattr(chat, "username", None):
+            lines.append(f"username: @{chat.username}")
+            lines.append(f"链接: https://t.me/{chat.username}/{origin.message_id}")
+        else:
+            lines.append(f"链接: https://t.me/c/{raw_id}/{origin.message_id}")
+        lines.append(f"chat_id: {cid}")
+        lines.append(f"消息 id: {origin.message_id}")
+    elif isinstance(origin, pyrogram.types.MessageForwardOriginUser):
+        u = origin.sender_user
+        lines.append(f"来源用户: {u.first_name or ''} {u.last_name or ''}")
+        lines.append(f"user_id: {u.id}")
+        if getattr(u, "username", None):
+            lines.append(f"username: @{u.username}")
+    elif isinstance(origin, pyrogram.types.MessageForwardOriginHiddenUser):
+        lines.append("来源被隐藏(用户关闭了转发来源显示)")
+        lines.append(f"显示名: {origin.sender_user_name}")
+    else:
+        lines.append(f"来源类型: {type(origin).__name__}")
+    fwd_date = getattr(origin, "date", None)
+    if fwd_date:
+        lines.append(f"原消息时间: {fwd_date.astimezone().strftime('%Y-%m-%d %H:%M:%S')}")
+    return "\n".join(lines)
+
+
+async def toggle_id_mode(
+    client: pyrogram.Client, message: pyrogram.types.Message
+):
+    """切换 ID 模式:开启后,转发给 bot 的消息回复来源 id 而不是下载。"""
+    _bot.id_mode = not _bot.id_mode
+    if _bot.id_mode:
+        reply = (
+            "ID 模式: ON\n"
+            "现在把任意消息转发给我,我会回复来源(频道/群/个人)的 id 与消息 id。\n"
+            "再次发送 /id 关闭,恢复转发即下载。"
+        )
+    else:
+        reply = "ID 模式: OFF\n转发消息已恢复为直接下载。"
+    await client.send_message(message.from_user.id, reply)
+
+
+async def forward_ids_text(
+    client: pyrogram.Client, message: pyrogram.types.Message
+):
+    """ID 模式开启时,转发来的纯文本消息(如频道公告)也回复来源 id。"""
+    if not _bot.id_mode or not message.forward_origin:
+        return
+    await client.send_message(message.from_user.id, format_forward_ids(message))
+
+
 async def download_forward_media(
     client: pyrogram.Client, message: pyrogram.types.Message
 ):
@@ -876,6 +954,9 @@ async def download_forward_media(
     Returns:
         None
     """
+    if _bot.id_mode:
+        await client.send_message(message.from_user.id, format_forward_ids(message))
+        return
 
     if message.media and getattr(message, message.media.value):
         await direct_download(_bot, message.from_user.id, message, message, client)
