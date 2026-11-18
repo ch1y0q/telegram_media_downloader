@@ -882,37 +882,47 @@ async def direct_download(
 
 
 async def format_forward_ids(message: pyrogram.types.Message) -> str:
-    """解析转发的消息来源,输出对面的 chat id 与消息 id。"""
+    """解析转发的消息来源,输出对面的 chat id 与消息 id。
+
+    本 fork 的 pyrogram 是旧 layer:转发信息在 forward_from_chat /
+    forward_from / forward_sender_name / forward_from_message_id 上,
+    没有 forward_origin。
+    """
     lines = []
-    origin = message.forward_origin
-    if origin is None:
-        return "这不是带转发来源的消息(或来源被 Telegram 抹除),无法解析 id。"
-    if isinstance(origin, pyrogram.types.MessageForwardOriginChannel):
-        chat = origin.chat
-        raw_id = chat.id
-        cid = f"-100{raw_id}"
-        lines.append(f"来源频道: {chat.title}")
-        if getattr(chat, "username", None):
-            lines.append(f"username: @{chat.username}")
-            lines.append(f"链接: https://t.me/{chat.username}/{origin.message_id}")
+    fchat = getattr(message, "forward_from_chat", None)
+    fuser = getattr(message, "forward_from", None)
+    fname = getattr(message, "forward_sender_name", None)
+    fmid = getattr(message, "forward_from_message_id", None)
+    fdate = getattr(message, "forward_date", None)
+    if fchat is not None:
+        kind = "频道" if getattr(fchat, "broadcast", False) else "群"
+        raw_id = fchat.id
+        lines.append(f"来源{kind}: {getattr(fchat, 'title', '?')}")
+        if getattr(fchat, "username", None):
+            lines.append(f"username: @{fchat.username}")
+            lines.append(f"链接: https://t.me/{fchat.username}/{fmid}")
         else:
-            lines.append(f"链接: https://t.me/c/{raw_id}/{origin.message_id}")
-        lines.append(f"chat_id: {cid}")
-        lines.append(f"消息 id: {origin.message_id}")
-    elif isinstance(origin, pyrogram.types.MessageForwardOriginUser):
-        u = origin.sender_user
-        lines.append(f"来源用户: {u.first_name or ''} {u.last_name or ''}")
-        lines.append(f"user_id: {u.id}")
-        if getattr(u, "username", None):
-            lines.append(f"username: @{u.username}")
-    elif isinstance(origin, pyrogram.types.MessageForwardOriginHiddenUser):
+            lines.append(f"链接: https://t.me/c/{raw_id}/{fmid}")
+        lines.append(f"chat_id: -100{raw_id}")
+        lines.append(f"消息 id: {fmid}")
+    elif fuser is not None:
+        name = " ".join(filter(None, [getattr(fuser, "first_name", ""),
+                                      getattr(fuser, "last_name", "")]))
+        lines.append(f"来源用户: {name}")
+        lines.append(f"user_id: {fuser.id}")
+        if getattr(fuser, "username", None):
+            lines.append(f"username: @{fuser.username}")
+    elif fname:
         lines.append("来源被隐藏(用户关闭了转发来源显示)")
-        lines.append(f"显示名: {origin.sender_user_name}")
+        lines.append(f"显示名: {fname}")
     else:
-        lines.append(f"来源类型: {type(origin).__name__}")
-    fwd_date = getattr(origin, "date", None)
-    if fwd_date:
-        lines.append(f"原消息时间: {fwd_date.astimezone().strftime('%Y-%m-%d %H:%M:%S')}")
+        return "这不是带转发来源的消息,无法解析 id。"
+    if fdate:
+        try:
+            fdate = fdate.astimezone()
+        except ValueError:
+            pass
+        lines.append(f"原消息时间: {fdate.strftime('%Y-%m-%d %H:%M:%S')}")
     return "\n".join(lines)
 
 
@@ -936,8 +946,10 @@ async def forward_ids_text(
     client: pyrogram.Client, message: pyrogram.types.Message
 ):
     """ID 模式开启时,转发来的纯文本消息(如频道公告)也回复来源 id。"""
-    if not _bot.id_mode or not message.forward_origin:
+    if not _bot.id_mode:
         return
+    if getattr(message, "forward_date", None) is None:
+        return  # 手打的文本/命令,不是转发
     await client.send_message(message.from_user.id, format_forward_ids(message))
 
 
