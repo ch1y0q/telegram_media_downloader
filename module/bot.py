@@ -964,13 +964,13 @@ def format_forward_ids(message: pyrogram.types.Message) -> str:
 def ux_status_text(uid: int) -> str:
     """当前状态摘要(按语言)。"""
     ctx = _bot.get_user_ctx(uid)
-    mode = _t("ID mode: ON (forwards will report source ids)") \
-        if ctx["mode"] == "id" else _t("Mode: download (forwards follow destination settings)")
+    mode = _t("ID: on (forwards will report source ids)") \
+        if ctx["mode"] == "id" else _t("download (follows destination settings)")
     dst = ctx.get("dst")
     if dst is None:
-        dst_s = _t("Destination: not set")
+        dst_s = _t("not set")
     elif dst["type"] == "disk":
-        dst_s = _t("Destination: server disk")
+        dst_s = _t("server disk")
     else:
         dst_s = dst.get("title", str(dst.get("id")))
     return "\n".join([

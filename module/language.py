@@ -326,6 +326,14 @@ translations = {
     ],
     "Destination": ["目的地", "", ""],
     "Mode": ["模式", "Режим", "Режим"],
+    "ID: on (forwards will report source ids)": [
+        "ID: 开(转发将回报来源 id)", "", "",
+    ],
+    "download (follows destination settings)": [
+        "下载(按目的地设置处理)", "", "",
+    ],
+    "not set": ["未设置", "", ""],
+    "server disk": ["服务器磁盘", "", ""],
     "Destination: not set": ["目的地: 未设置", "", ""],
     "Destination: server disk": ["目的地: 服务器磁盘", "", ""],
     "Destination locked": ["目的地已锁定", "", ""],
