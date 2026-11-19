@@ -159,10 +159,12 @@ class DownloadBot:
             dst_btn = "🎯 目的地: 💾 本机磁盘"
         else:
             dst_btn = f"🎯 目的地: {dst.get('title', dst.get('id'))}"
+        lang_btn = f"🌐 语言: {'中文' if self.app.language == Language.ZH else 'EN'}"
         return InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton(mode_btn, callback_data="ux:mode")],
                 [InlineKeyboardButton(dst_btn, callback_data="ux:dst")],
+                [InlineKeyboardButton(lang_btn, callback_data="ux:lang")],
                 [InlineKeyboardButton("🚫 解除目的地锁定", callback_data="ux:dst_clear")],
                 [InlineKeyboardButton("📖 帮助", callback_data="ux:help")],
             ]
@@ -1091,6 +1093,11 @@ async def on_ux_callback(
         ctx["await_dst"] = False
         _bot.update_config()
         await query.answer("已解除目的地锁定")
+    elif data == "ux:lang":
+        new_lang = Language.EN if _bot.app.language == Language.ZH else Language.ZH
+        _bot.app.set_language(new_lang)
+        _bot.app.update_config()  # 持久化,重启不回退
+        await query.answer(f"语言: {new_lang.name}", show_alert=False)
     elif data == "ux:help":
         await query.answer()
         await client.send_message(uid, await send_help_str(client, uid))
