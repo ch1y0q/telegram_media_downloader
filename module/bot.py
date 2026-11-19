@@ -9,7 +9,7 @@ import pyrogram
 from loguru import logger
 from pyrogram import types
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from ruamel import yaml
 
 import utils
@@ -134,16 +134,22 @@ class DownloadBot:
         self.config["download_filter"] = self.download_filter
         self.config["user_context"] = self.user_context
 
-        with open("d", "w", encoding="utf-8") as yaml_file:
+        tmp = self.config_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as yaml_file:
             self._yaml.dump(self.config, yaml_file)
+        os.replace(tmp, self.config_path)
 
     def get_user_ctx(self, uid: int) -> dict:
         """每个用户的交互上下文:模式/锁定目的地/待设置标记(持久化到 bot 存储)。"""
+        defaults = {"mode": "download", "dst": None, "await_dst": False}
         ctx = self.user_context.get(str(uid))
         if ctx is None:
-            ctx = {"mode": "download", "dst": None, "await_dst": False}
+            ctx = dict(defaults)
             self.user_context[str(uid)] = ctx
             self.update_config()
+        else:
+            for k, v in defaults.items():
+                ctx.setdefault(k, v)
         return ctx
 
     async def start(
@@ -297,6 +303,7 @@ class DownloadBot:
             MessageHandler(
                 forward_ids_text,
                 filters=pyrogram.filters.text
+                & ~pyrogram.filters.regex(r"^/")
                 & pyrogram.filters.private
                 & pyrogram.filters.user(self.allowed_user_ids),
             )
@@ -305,21 +312,6 @@ class DownloadBot:
             MessageHandler(
                 dst_command,
                 filters=pyrogram.filters.command(["dst"])
-                & pyrogram.filters.user(self.allowed_user_ids),
-            )
-        )
-        self.bot.add_handler(
-            MessageHandler(
-                toggle_id_mode,
-                filters=pyrogram.filters.command(["id"])
-                & pyrogram.filters.user(self.allowed_user_ids),
-            )
-        )
-        self.bot.add_handler(
-            MessageHandler(
-                forward_ids_text,
-                filters=pyrogram.filters.text
-                & pyrogram.filters.private
                 & pyrogram.filters.user(self.allowed_user_ids),
             )
         )
@@ -944,8 +936,9 @@ def format_forward_ids(message: pyrogram.types.Message) -> str:
             lines.append(f"username: @{fchat.username}")
             lines.append(f"链接: https://t.me/{fchat.username}/{fmid}")
         else:
-            lines.append(f"链接: https://t.me/c/{raw_id}/{fmid}")
-        lines.append(f"chat_id: -100{raw_id}")
+            internal = abs(raw_id) - 10**12
+        lines.append(f"链接: https://t.me/c/{internal}/{fmid}")
+        lines.append(f"chat_id: {raw_id}")
         lines.append(f"消息 id: {fmid}")
     elif fuser is not None:
         name = " ".join(filter(None, [getattr(fuser, "first_name", ""),
@@ -1077,7 +1070,7 @@ async def forward_ids_text(
             _bot.update_config()
             await client.send_message(uid, _t("Destination setup cancelled."))
             return
-        if low in ("本机", "disk", "本机磁盘"):
+        if low in ("本机", "disk", "本机磁盘") or text.strip("【】 ") in ("本机", "disk", "本机磁盘"):
             ctx["dst"] = {"type": "disk", "title": _t("Destination: server disk")}
         else:
             try:

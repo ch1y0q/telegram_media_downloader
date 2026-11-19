@@ -325,6 +325,7 @@ translations = {
         "模式: 下载(转发按目的地设置处理)", "", "",
     ],
     "Destination": ["目的地", "", ""],
+    "Mode": ["模式", "Режим", "Режим"],
     "Destination: not set": ["目的地: 未设置", "", ""],
     "Destination: server disk": ["目的地: 服务器磁盘", "", ""],
     "Destination locked": ["目的地已锁定", "", ""],
