@@ -146,30 +146,6 @@ class DownloadBot:
             self.update_config()
         return ctx
 
-    def ux_menu_markup(self, uid: int):
-        """主控制面板的 inline 键盘。"""
-        ctx = self.get_user_ctx(uid)
-        mode_btn = (
-            "🆔 模式: ID(转发回来源)" if ctx["mode"] == "id" else "📥 模式: 下载"
-        )
-        dst = ctx.get("dst")
-        if dst is None:
-            dst_btn = "🎯 目的地: 未设置"
-        elif dst["type"] == "disk":
-            dst_btn = "🎯 目的地: 💾 本机磁盘"
-        else:
-            dst_btn = f"🎯 目的地: {dst.get('title', dst.get('id'))}"
-        lang_btn = f"🌐 语言: {'中文' if self.app.language == Language.ZH else 'EN'}"
-        return InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton(mode_btn, callback_data="ux:mode")],
-                [InlineKeyboardButton(dst_btn, callback_data="ux:dst")],
-                [InlineKeyboardButton(lang_btn, callback_data="ux:lang")],
-                [InlineKeyboardButton("🚫 解除目的地锁定", callback_data="ux:dst_clear")],
-                [InlineKeyboardButton("📖 帮助", callback_data="ux:help")],
-            ]
-        )
-
     async def start(
         self,
         app: Application,
@@ -326,9 +302,9 @@ class DownloadBot:
             )
         )
         self.bot.add_handler(
-            CallbackQueryHandler(
-                on_ux_callback,
-                filters=pyrogram.filters.regex(r"^ux:")
+            MessageHandler(
+                dst_command,
+                filters=pyrogram.filters.command(["dst"])
                 & pyrogram.filters.user(self.allowed_user_ids),
             )
         )
@@ -992,46 +968,117 @@ def format_forward_ids(message: pyrogram.types.Message) -> str:
     return "\n".join(lines)
 
 
+def ux_status_text(uid: int) -> str:
+    """当前状态摘要(按语言)。"""
+    ctx = _bot.get_user_ctx(uid)
+    mode = _t("ID mode: ON (forwards will report source ids)") \
+        if ctx["mode"] == "id" else _t("Mode: download (forwards follow destination settings)")
+    dst = ctx.get("dst")
+    if dst is None:
+        dst_s = _t("Destination: not set")
+    elif dst["type"] == "disk":
+        dst_s = _t("Destination: server disk")
+    else:
+        dst_s = dst.get("title", str(dst.get("id")))
+    return "\n".join([
+        _t("🎛 Control panel"),
+        _t("Mode") + ": " + mode,
+        _t("Destination") + ": " + dst_s,
+    ])
+
+
+def ux_reply_markup():
+    """常驻底部键盘(不随会话消失)。按钮点按即发送对应命令。"""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("🎛 面板"), KeyboardButton("🆔 ID模式")],
+            [KeyboardButton("🇨🇳 中文"), KeyboardButton("🇬🇧 EN")],
+            [KeyboardButton("🎯 目的地"), KeyboardButton("📖 帮助")],
+        ],
+        is_persistent=True,
+        resize_keyboard=True,
+    )
+
+
 async def toggle_id_mode(
     client: pyrogram.Client, message: pyrogram.types.Message
 ):
-    """切换当前用户的交互模式(下载 / ID),也可用主菜单按钮切换。"""
-    ctx = _bot.get_user_ctx(message.from_user.id)
+    """切换当前用户的交互模式(下载 / ID)。"""
+    uid = message.from_user.id
+    ctx = _bot.get_user_ctx(uid)
     ctx["mode"] = "id" if ctx["mode"] == "download" else "download"
     _bot.update_config()
-    if ctx["mode"] == "id":
-        reply = (
-            "ID 模式: ON\n"
-            "现在转发任意消息给我,我会回复来源(频道/群/个人)的 id 与消息 id。\n"
-            "再发 /id 或点菜单按钮切回下载模式。"
-        )
-    else:
-        reply = (
-            "模式: 下载\n"
-            "转发媒体给我将按目的地设置处理(未锁定目的地则下载到服务器磁盘)。"
-        )
-    await client.send_message(
-        message.from_user.id, reply, reply_markup=_bot.ux_menu_markup(message.from_user.id)
-    )
+    await client.send_message(uid, ux_status_text(uid), reply_markup=ux_reply_markup())
 
 
 async def forward_ids_text(
     client: pyrogram.Client, message: pyrogram.types.Message
 ):
-    """私聊文本处理:目的地设置捕获 / ID 模式报告 / 取消。"""
+    """私聊文本处理:常驻键盘按钮 / 目的地设置捕获 / ID 模式报告 / 取消。"""
     uid = message.from_user.id
     ctx = _bot.get_user_ctx(uid)
     text = (message.text or "").strip()
 
+    # ---- 常驻键盘按钮:点按即发送文本,这里映射到对应动作 ----
+    button_cmds = {
+        "🎛 面板": "menu",
+        "🆔 ID模式": "id",
+        "🇨🇳 中文": "lang_zh",
+        "🇬🇧 EN": "lang_en",
+        "🎯 目的地": "dst",
+        "📖 帮助": "help",
+    }
+    if text in button_cmds:
+        act = button_cmds[text]
+        if act == "menu":
+            await client.send_message(
+                uid, ux_status_text(uid), reply_markup=ux_reply_markup()
+            )
+        elif act == "id":
+            ctx["mode"] = "id" if ctx["mode"] == "download" else "download"
+            _bot.update_config()
+            await client.send_message(
+                uid, ux_status_text(uid), reply_markup=ux_reply_markup()
+            )
+        elif act == "lang_zh":
+            _bot.app.set_language(Language.ZH)
+            _bot.app.update_config()
+            await client.send_message(
+                uid,
+                _t("Language set to") + " ZH",
+                reply_markup=ux_reply_markup(),
+            )
+        elif act == "lang_en":
+            _bot.app.set_language(Language.EN)
+            _bot.app.update_config()
+            await client.send_message(
+                uid,
+                _t("Language set to") + " EN",
+                reply_markup=ux_reply_markup(),
+            )
+        elif act == "dst":
+            ctx["await_dst"] = True
+            _bot.update_config()
+            await client.send_message(
+                uid,
+                _t("Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts."),
+            )
+        elif act == "help":
+            await client.send_message(
+                uid, await send_help_str(client, uid), reply_markup=ux_reply_markup()
+            )
+        return
+
+    # ---- 目的地设置捕获 ----
     if ctx.get("await_dst"):
         low = text.lower()
         if low in ("/cancel", "取消"):
             ctx["await_dst"] = False
             _bot.update_config()
-            await client.send_message(uid, "已取消目的地设置。")
+            await client.send_message(uid, _t("Destination setup cancelled."))
             return
         if low in ("本机", "disk", "本机磁盘"):
-            ctx["dst"] = {"type": "disk", "title": "本机磁盘"}
+            ctx["dst"] = {"type": "disk", "title": _t("Destination: server disk")}
         else:
             try:
                 chat = await _bot.client.get_chat(text)
@@ -1047,19 +1094,21 @@ async def forward_ids_text(
             except Exception as e:
                 await client.send_message(
                     uid,
-                    f"目的地验证失败: {e}\n请重新发送频道/群链接或 id,或 /cancel 取消。",
+                    _t("Destination verify failed") + f": {e}\n"
+                    + _t("Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts."),
                 )
                 return
         ctx["await_dst"] = False
         _bot.update_config()
         await client.send_message(
             uid,
-            f"目的地已锁定: {ctx['dst'].get('title')}\n"
-            "之后转发的媒体将按该目的地处理。控制面板:",
-            reply_markup=_bot.ux_menu_markup(uid),
+            _t("Destination locked") + ": " + str(ctx["dst"].get("title"))
+            + "\n" + ux_status_text(uid),
+            reply_markup=ux_reply_markup(),
         )
         return
 
+    # ---- ID 模式:转发消息报告来源 ----
     if ctx["mode"] != "id":
         return
     if getattr(message, "forward_date", None) is None:
@@ -1067,45 +1116,18 @@ async def forward_ids_text(
     await client.send_message(uid, format_forward_ids(message))
 
 
-async def on_ux_callback(
-    client: pyrogram.Client, query: pyrogram.types.CallbackQuery
+async def dst_command(
+    client: pyrogram.Client, message: pyrogram.types.Message
 ):
-    """主控制面板按钮回调(ux: 前缀)。"""
-    uid = query.from_user.id
+    """进入目的地设置:下一条私聊消息将被当作目的地。"""
+    uid = message.from_user.id
     ctx = _bot.get_user_ctx(uid)
-    data = query.data or ""
-    if data == "ux:mode":
-        ctx["mode"] = "id" if ctx["mode"] == "download" else "download"
-        _bot.update_config()
-        await query.answer(f"模式: {ctx['mode']}", show_alert=False)
-    elif data == "ux:dst":
-        ctx["await_dst"] = True
-        _bot.update_config()
-        await query.answer()
-        await client.send_message(
-            uid,
-            "请发送目的地:频道/群的链接或 id(如 -100xxxx 或 @xxx);\n"
-            "发送【本机】表示下载到服务器磁盘;发送 /cancel 取消。",
-        )
-        return
-    elif data == "ux:dst_clear":
-        ctx["dst"] = None
-        ctx["await_dst"] = False
-        _bot.update_config()
-        await query.answer("已解除目的地锁定")
-    elif data == "ux:lang":
-        new_lang = Language.EN if _bot.app.language == Language.ZH else Language.ZH
-        _bot.app.set_language(new_lang)
-        _bot.app.update_config()  # 持久化,重启不回退
-        await query.answer(f"语言: {new_lang.name}", show_alert=False)
-    elif data == "ux:help":
-        await query.answer()
-        await client.send_message(uid, await send_help_str(client, uid))
-        return
-    try:
-        await query.edit_message_reply_markup(reply_markup=_bot.ux_menu_markup(uid))
-    except Exception:
-        pass
+    ctx["await_dst"] = True
+    _bot.update_config()
+    await client.send_message(
+        uid,
+        _t("Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts."),
+    )
 
 
 async def ux_menu_command(
@@ -1114,7 +1136,9 @@ async def ux_menu_command(
     """主控制面板。"""
     uid = message.from_user.id
     await client.send_message(
-        uid, "🎛 控制面板:", reply_markup=_bot.ux_menu_markup(uid)
+        message.from_user.id,
+        ux_status_text(message.from_user.id),
+        reply_markup=ux_reply_markup(),
     )
 
 

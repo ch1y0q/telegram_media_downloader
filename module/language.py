@@ -317,6 +317,23 @@ translations = {
     "Stop Forward": ["停止转发", "", ""],
     "Stop Listen Forward": ["停止监听转发", "", ""],
     "all": ["全部", "", ""],
+    "🎛 Control panel": ["🎛 控制面板", "", ""],
+    "ID mode: ON (forwards will report source ids)": [
+        "ID 模式: 开(转发将回报来源 id)", "", "",
+    ],
+    "Mode: download (forwards follow destination settings)": [
+        "模式: 下载(转发按目的地设置处理)", "", "",
+    ],
+    "Destination": ["目的地", "", ""],
+    "Destination: not set": ["目的地: 未设置", "", ""],
+    "Destination: server disk": ["目的地: 服务器磁盘", "", ""],
+    "Destination locked": ["目的地已锁定", "", ""],
+    "Destination setup cancelled.": ["已取消目的地设置。", "", ""],
+    "Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts.": [
+        "请发送目的地:频道/群链接或 id;【本机】=服务器磁盘;/cancel 取消", "", "",
+    ],
+    "Destination verify failed": ["目的地验证失败", "", ""],
+    "Language set to": ["语言已设置为", "", ""],
 }
 
 
