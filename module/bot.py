@@ -11,7 +11,12 @@ import pyrogram
 from loguru import logger
 from pyrogram import types
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from pyrogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 from ruamel import yaml
 
 import utils
@@ -959,8 +964,12 @@ def format_forward_ids(message: pyrogram.types.Message) -> str:
         lines.append(f"chat_id: {raw_id}")
         lines.append(f"消息 id: {fmid}")
     elif fuser is not None:
-        name = " ".join(filter(None, [getattr(fuser, "first_name", ""),
-                                      getattr(fuser, "last_name", "")]))
+        name = " ".join(
+            filter(
+                None,
+                [getattr(fuser, "first_name", ""), getattr(fuser, "last_name", "")],
+            )
+        )
         lines.append(f"来源用户: {name}")
         lines.append(f"user_id: {fuser.id}")
         if getattr(fuser, "username", None):
@@ -982,8 +991,11 @@ def format_forward_ids(message: pyrogram.types.Message) -> str:
 def ux_status_text(uid: int) -> str:
     """当前状态摘要(按语言)。"""
     ctx = _bot.get_user_ctx(uid)
-    mode = _t("ID: on (forwards will report source ids)") \
-        if ctx["mode"] == "id" else _t("download (follows destination settings)")
+    mode = (
+        _t("ID: on (forwards will report source ids)")
+        if ctx["mode"] == "id"
+        else _t("download (follows destination settings)")
+    )
     dst = ctx.get("dst")
     if dst is None:
         dst_s = _t("not set")
@@ -991,11 +1003,13 @@ def ux_status_text(uid: int) -> str:
         dst_s = _t("server disk")
     else:
         dst_s = dst.get("title", str(dst.get("id")))
-    return "\n".join([
-        _t("🎛 Control panel"),
-        _t("Mode") + ": " + mode,
-        _t("Destination") + ": " + dst_s,
-    ])
+    return "\n".join(
+        [
+            _t("🎛 Control panel"),
+            _t("Mode") + ": " + mode,
+            _t("Destination") + ": " + dst_s,
+        ]
+    )
 
 
 def ux_reply_markup():
@@ -1011,9 +1025,7 @@ def ux_reply_markup():
     )
 
 
-async def toggle_id_mode(
-    client: pyrogram.Client, message: pyrogram.types.Message
-):
+async def toggle_id_mode(client: pyrogram.Client, message: pyrogram.types.Message):
     """切换当前用户的交互模式(下载 / ID)。"""
     uid = message.from_user.id
     ctx = _bot.get_user_ctx(uid)
@@ -1049,14 +1061,15 @@ def normalize_destination(text: str) -> Union[str, int]:
         if parts[0] == "s":
             parts = parts[1:]
         if parts and parts[0] == "c":
-            if (
-                2 <= len(parts) <= 4
-                and all(re.fullmatch(r"[1-9][0-9]*", part) for part in parts[1:])
+            if 2 <= len(parts) <= 4 and all(
+                re.fullmatch(r"[1-9][0-9]*", part) for part in parts[1:]
             ):
                 return -(10**12 + int(parts[1]))
             raise ValueError("Invalid private chat link")
-        if not parts or len(parts) > 3 or any(
-            not re.fullmatch(r"[1-9][0-9]*", part) for part in parts[1:]
+        if (
+            not parts
+            or len(parts) > 3
+            or any(not re.fullmatch(r"[1-9][0-9]*", part) for part in parts[1:])
         ):
             raise ValueError("Invalid chat link")
         text = parts[0]
@@ -1074,9 +1087,7 @@ async def cancel_destination(client: pyrogram.Client, message: pyrogram.types.Me
     await client.send_message(uid, _t("Destination setup cancelled."))
 
 
-async def forward_ids_text(
-    client: pyrogram.Client, message: pyrogram.types.Message
-):
+async def forward_ids_text(client: pyrogram.Client, message: pyrogram.types.Message):
     """私聊文本处理:常驻键盘按钮 / 目的地设置捕获 / ID 模式报告 / 取消。"""
     uid = message.from_user.id
     ctx = _bot.get_user_ctx(uid)
@@ -1124,7 +1135,9 @@ async def forward_ids_text(
             _bot.update_config()
             await client.send_message(
                 uid,
-                _t("Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts."),
+                _t(
+                    "Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts."
+                ),
             )
         elif act == "help":
             await send_help_str(client, uid)
@@ -1141,9 +1154,7 @@ async def forward_ids_text(
         else:
             try:
                 chat = await _bot.client.get_chat(normalize_destination(text))
-                title = getattr(chat, "title", None) or getattr(
-                    chat, "first_name", "?"
-                )
+                title = getattr(chat, "title", None) or getattr(chat, "first_name", "?")
                 ctx["dst"] = {
                     "type": "chat",
                     "id": chat.id,
@@ -1153,8 +1164,11 @@ async def forward_ids_text(
             except Exception as e:
                 await client.send_message(
                     uid,
-                    _t("Destination verify failed") + f": {e}\n"
-                    + _t("Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts."),
+                    _t("Destination verify failed")
+                    + f": {e}\n"
+                    + _t(
+                        "Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts."
+                    ),
                 )
                 return
         ctx["await_dst"] = False
@@ -1166,8 +1180,7 @@ async def forward_ids_text(
         )
         await client.send_message(
             uid,
-            _t("Destination locked") + ": " + dst_title
-            + "\n" + ux_status_text(uid),
+            _t("Destination locked") + ": " + dst_title + "\n" + ux_status_text(uid),
             reply_markup=ux_reply_markup(),
         )
         return
@@ -1180,9 +1193,7 @@ async def forward_ids_text(
     await client.send_message(uid, format_forward_ids(message))
 
 
-async def dst_command(
-    client: pyrogram.Client, message: pyrogram.types.Message
-):
+async def dst_command(client: pyrogram.Client, message: pyrogram.types.Message):
     """进入目的地设置:下一条私聊消息将被当作目的地。"""
     uid = message.from_user.id
     ctx = _bot.get_user_ctx(uid)
@@ -1190,13 +1201,13 @@ async def dst_command(
     _bot.update_config()
     await client.send_message(
         uid,
-        _t("Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts."),
+        _t(
+            "Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts."
+        ),
     )
 
 
-async def ux_menu_command(
-    client: pyrogram.Client, message: pyrogram.types.Message
-):
+async def ux_menu_command(client: pyrogram.Client, message: pyrogram.types.Message):
     """主控制面板。"""
     uid = message.from_user.id
     await client.send_message(
@@ -1232,9 +1243,7 @@ async def download_forward_media(
             await _bot.bot.forward_messages(dst["id"], message.chat.id, message.id)
             await client.send_message(uid, f"已转发到 {dst.get('title')} ✓")
         except Exception as e:
-            await client.send_message(
-                uid, f"转发到目的地失败: {e}\n已改走下载流程。"
-            )
+            await client.send_message(uid, f"转发到目的地失败: {e}\n已改走下载流程。")
             if message.media and getattr(message, message.media.value):
                 await direct_download(_bot, uid, message, message, client)
         return
