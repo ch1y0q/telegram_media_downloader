@@ -2,8 +2,10 @@
 
 import asyncio
 import os
+import re
 from datetime import datetime
 from typing import Callable, List, Union
+from urllib.parse import urlsplit
 
 import pyrogram
 from loguru import logger
@@ -245,6 +247,17 @@ class DownloadBot:
 
         self.bot.add_handler(
             MessageHandler(
+                capture_destination,
+                filters=pyrogram.filters.create(awaiting_destination)
+                & pyrogram.filters.text
+                & ~pyrogram.filters.regex(r"^/")
+                & pyrogram.filters.private
+                & pyrogram.filters.user(self.allowed_user_ids),
+            ),
+            group=-1,
+        )
+        self.bot.add_handler(
+            MessageHandler(
                 download_from_bot,
                 filters=pyrogram.filters.command(["download"])
                 & pyrogram.filters.user(self.allowed_user_ids),
@@ -274,7 +287,7 @@ class DownloadBot:
         self.bot.add_handler(
             MessageHandler(
                 download_from_link,
-                filters=pyrogram.filters.regex(r"^https://t.me.*")
+                filters=pyrogram.filters.regex(r"^https://t\.me/")
                 & pyrogram.filters.user(self.allowed_user_ids),
             )
         )
@@ -331,8 +344,9 @@ class DownloadBot:
         )
         self.bot.add_handler(
             MessageHandler(
-                help_command,
-                filters=pyrogram.filters.command(["start"])
+                cancel_destination,
+                filters=pyrogram.filters.command(["cancel"])
+                & pyrogram.filters.private
                 & pyrogram.filters.user(self.allowed_user_ids),
             )
         )
@@ -422,9 +436,6 @@ async def send_help_str(client: pyrogram.Client, chat_id):
     Parameters:
         client (pyrogram.Client): The Pyrogram client used to send the message.
         chat_id: The ID of the chat to which the message will be sent.
-
-    Returns:
-        str: The help string that was sent.
 
     Note:
         The help string includes information about the Telegram Media Downloader bot,
@@ -869,8 +880,9 @@ async def remove_replace_advertisement_filter(
                 message.from_user.id, f"{_t('Remove filter')} : {filter_str}"
             )
         else:
-            _bot.app.replace_advertisement_list.append(filter_str)
-            await client.send_message()
+            await client.send_message(
+                message.from_user.id, f"{_t('Filter')} : {filter_str} {_t('not exist')}"
+            )
         _bot.app.update_config(True)
     except Exception as e:
         await client.send_message(
@@ -929,15 +941,21 @@ def format_forward_ids(message: pyrogram.types.Message) -> str:
     fmid = getattr(message, "forward_from_message_id", None)
     fdate = getattr(message, "forward_date", None)
     if fchat is not None:
-        kind = "频道" if getattr(fchat, "broadcast", False) else "群"
+        is_channel = (
+            getattr(fchat, "broadcast", False)
+            or getattr(fchat, "type", None) == pyrogram.enums.ChatType.CHANNEL
+        )
+        kind = "频道" if is_channel else "群"
         raw_id = fchat.id
         lines.append(f"来源{kind}: {getattr(fchat, 'title', '?')}")
         if getattr(fchat, "username", None):
             lines.append(f"username: @{fchat.username}")
-            lines.append(f"链接: https://t.me/{fchat.username}/{fmid}")
-        else:
-            internal = abs(raw_id) - 10**12
-        lines.append(f"链接: https://t.me/c/{internal}/{fmid}")
+            if isinstance(fmid, int) and fmid > 0:
+                lines.append(f"链接: https://t.me/{fchat.username}/{fmid}")
+        elif isinstance(raw_id, int) and raw_id < -(10**12):
+            if isinstance(fmid, int) and fmid > 0:
+                internal = -raw_id - 10**12
+                lines.append(f"链接: https://t.me/c/{internal}/{fmid}")
         lines.append(f"chat_id: {raw_id}")
         lines.append(f"消息 id: {fmid}")
     elif fuser is not None:
@@ -1004,6 +1022,58 @@ async def toggle_id_mode(
     await client.send_message(uid, ux_status_text(uid), reply_markup=ux_reply_markup())
 
 
+async def awaiting_destination(_, client, message) -> bool:
+    """Only capture destination text for a user who is setting a destination."""
+    user = getattr(message, "from_user", None)
+    return bool(user and _bot.user_context.get(str(user.id), {}).get("await_dst"))
+
+
+async def capture_destination(client: pyrogram.Client, message: pyrogram.types.Message):
+    """Consume pending destination text before the ordinary download handlers."""
+    await forward_ids_text(client, message)
+    message.stop_propagation()
+
+
+def normalize_destination(text: str) -> Union[str, int]:
+    """Normalize explicit chat ids, usernames and t.me chat/message links."""
+    text = text.strip()
+    if re.fullmatch(r"-?[1-9][0-9]*", text):
+        return int(text)
+    if text.lower().startswith("t.me/"):
+        text = "https://" + text
+    if "://" in text:
+        link = urlsplit(text)
+        if link.scheme not in ("http", "https") or link.netloc.lower() != "t.me":
+            raise ValueError("Expected a t.me chat link")
+        parts = link.path.strip("/").split("/")
+        if parts[0] == "s":
+            parts = parts[1:]
+        if parts and parts[0] == "c":
+            if (
+                2 <= len(parts) <= 4
+                and all(re.fullmatch(r"[1-9][0-9]*", part) for part in parts[1:])
+            ):
+                return -(10**12 + int(parts[1]))
+            raise ValueError("Invalid private chat link")
+        if not parts or len(parts) > 3 or any(
+            not re.fullmatch(r"[1-9][0-9]*", part) for part in parts[1:]
+        ):
+            raise ValueError("Invalid chat link")
+        text = parts[0]
+    if re.fullmatch(r"@?[A-Za-z][A-Za-z0-9_]{0,31}", text):
+        return "@" + text.lstrip("@")
+    raise ValueError("Expected a chat username, numeric id or t.me link")
+
+
+async def cancel_destination(client: pyrogram.Client, message: pyrogram.types.Message):
+    """Cancel destination setup without replacing the user's persisted context."""
+    uid = message.from_user.id
+    ctx = _bot.get_user_ctx(uid)
+    ctx["await_dst"] = False
+    _bot.update_config()
+    await client.send_message(uid, _t("Destination setup cancelled."))
+
+
 async def forward_ids_text(
     client: pyrogram.Client, message: pyrogram.types.Message
 ):
@@ -1057,24 +1127,20 @@ async def forward_ids_text(
                 _t("Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts."),
             )
         elif act == "help":
-            await client.send_message(
-                uid, await send_help_str(client, uid), reply_markup=ux_reply_markup()
-            )
+            await send_help_str(client, uid)
         return
 
     # ---- 目的地设置捕获 ----
     if ctx.get("await_dst"):
         low = text.lower()
-        if low in ("/cancel", "取消"):
-            ctx["await_dst"] = False
-            _bot.update_config()
-            await client.send_message(uid, _t("Destination setup cancelled."))
+        if low in ("/cancel", "取消") or low.startswith("/cancel@"):
+            await cancel_destination(client, message)
             return
         if low in ("本机", "disk", "本机磁盘") or text.strip("【】 ") in ("本机", "disk", "本机磁盘"):
-            ctx["dst"] = {"type": "disk", "title": _t("Destination: server disk")}
+            ctx["dst"] = {"type": "disk", "title": _t("server disk")}
         else:
             try:
-                chat = await _bot.client.get_chat(text)
+                chat = await _bot.client.get_chat(normalize_destination(text))
                 title = getattr(chat, "title", None) or getattr(
                     chat, "first_name", "?"
                 )
@@ -1093,9 +1159,14 @@ async def forward_ids_text(
                 return
         ctx["await_dst"] = False
         _bot.update_config()
+        dst_title = (
+            _t("server disk")
+            if ctx["dst"]["type"] == "disk"
+            else str(ctx["dst"].get("title"))
+        )
         await client.send_message(
             uid,
-            _t("Destination locked") + ": " + str(ctx["dst"].get("title"))
+            _t("Destination locked") + ": " + dst_title
             + "\n" + ux_status_text(uid),
             reply_markup=ux_reply_markup(),
         )
@@ -1191,7 +1262,12 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
         None
     """
 
-    if not message.text or not message.text.startswith("https://t.me"):
+    if not message.text or not message.text.startswith("https://t.me/"):
+        return
+
+    ctx = _bot.get_user_ctx(message.from_user.id)
+    if ctx["mode"] == "id" and getattr(message, "forward_date", None):
+        await forward_ids_text(client, message)
         return
 
     msg = (
@@ -1204,6 +1280,7 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
         await client.send_message(
             message.from_user.id, msg, parse_mode=pyrogram.enums.ParseMode.HTML
         )
+        return
 
     chat_id, message_id, _ = await parse_link(_bot.client, text[0])
 
@@ -1218,7 +1295,7 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
             if download_message:
                 await direct_download(_bot, entity.id, message, download_message)
             else:
-                client.send_message(
+                await client.send_message(
                     message.from_user.id,
                     f"{_t('From')} {entity.title} {_t('download')} {message_id} {_t('error')}!",
                     reply_to_message_id=message.id,
@@ -1389,6 +1466,7 @@ async def get_forward_task_node(
             await client.send_message(
                 message.from_user.id, err, reply_to_message_id=message.id
             )
+            return None
 
     last_reply_message = await client.send_message(
         message.from_user.id,
@@ -1777,21 +1855,21 @@ async def stop_task(
                 ],
             )
             await client.edit_message_text(
-                query.message.from_user.id,
+                query.message.chat.id,
                 query.message.id,
                 f"{_t('Stop')} {_t(task_type.name)}...",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
         else:
             await client.edit_message_text(
-                query.message.from_user.id,
+                query.message.chat.id,
                 query.message.id,
                 f"{_t('No Task')}",
             )
     else:
         task_id = query.data.split(" ")[2]
         await client.edit_message_text(
-            query.message.from_user.id,
+            query.message.chat.id,
             query.message.id,
             f"{_t('Stop')} {_t(task_type.name)}...",
         )

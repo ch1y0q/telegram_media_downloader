@@ -113,7 +113,7 @@ translations = {
         "Обрано англійську мову",
     ],
     "Language set to": [
-        "语言设置为",
+        "语言已设置为",
         "Выбран язык",
         "Обрано мову",
     ],
@@ -342,7 +342,6 @@ translations = {
         "请发送目的地:频道/群链接或 id;【本机】=服务器磁盘;/cancel 取消", "", "",
     ],
     "Destination verify failed": ["目的地验证失败", "", ""],
-    "Language set to": ["语言已设置为", "", ""],
 }
 
 
@@ -360,6 +359,6 @@ def _t(text: str):
         return text
 
     if text in translations:
-        return translations[text][_language.value - 2]
+        return translations[text][_language.value - 2] or text
 
     return text
