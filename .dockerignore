@@ -30,3 +30,26 @@ LICENSE
 dev-requirements.txt
 gen_filter_cache.py
 screenshot/
+
+# Never bake local credentials, authorization, or runtime state into images.
+.env
+.env.*
+config.yaml
+config.yaml.*
+data.yaml
+data.yaml.*
+bot.yaml
+bot.yaml.*
+bot_state.json*
+*.session
+*.session-*
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.pem
+*.key
+*.log
+backups/

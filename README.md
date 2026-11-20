@@ -112,6 +112,18 @@ pip3 install -r requirements.txt
 
 All the configurations are  passed to the Telegram Media Downloader via `config.yaml` file.
 
+This fork tracks only `config.example.yaml` and `data.example.yaml`, containing
+placeholders and empty state. On a fresh checkout (or in the extracted executable
+directory), copy them to `config.yaml` and `data.yaml` only if those files do not
+already exist, then fill in your local configuration. The application still reads
+the original runtime filenames; Docker Compose mounts those local files as before.
+Runtime configuration, Bot configuration, sessions, and backups must remain
+untracked and must not be added with `git add -f`.
+
+Before updating an existing deployment, back up its runtime configuration and
+data outside the checkout: this change removes the old tracked placeholder files.
+Do not replace an existing configuration or download history with a template.
+
 **Getting your API Keys:**
 The very first step requires you to obtain a valid Telegram API key (API id/hash pair):
 

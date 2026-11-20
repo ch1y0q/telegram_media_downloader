@@ -113,6 +113,15 @@ pip3 install -r requirements.txt
 
 所有配置都通过 config.yaml 文件传递​​给 `Telegram Media Downloader`。
 
+本 fork 只追踪 `config.example.yaml` 和 `data.example.yaml`，其中仅有占位配置和空状态。
+首次检出代码（或解压可执行程序）后，仅当对应文件不存在时，将模板复制为
+`config.yaml`、`data.yaml`，再填写本机配置。程序读取的文件名不变，
+Docker Compose 仍挂载本机的运行文件。实际配置、Bot 配置、会话和备份必须保持
+untracked，不要使用 `git add -f` 强制添加。
+
+已有部署更新前，请先将运行配置和数据备份到检出目录之外：本次变更会停止追踪并
+移除版本库中的旧占位文件。不要用模板覆盖已有配置或下载历史。
+
 **获取您的 API 密钥：**
 第一步需要您获得有效的 Telegram API 密钥（API id/hash pair）：
 
