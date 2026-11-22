@@ -317,6 +317,13 @@ class DownloadBot:
         )
         self.bot.add_handler(
             MessageHandler(
+                cancel_dst_command,
+                filters=pyrogram.filters.command(["cancel"])
+                & pyrogram.filters.user(self.allowed_user_ids),
+            )
+        )
+        self.bot.add_handler(
+            MessageHandler(
                 help_command,
                 filters=pyrogram.filters.command(["help"])
                 & pyrogram.filters.user(self.allowed_user_ids),
@@ -326,13 +333,6 @@ class DownloadBot:
             MessageHandler(
                 get_info,
                 filters=pyrogram.filters.command(["get_info"])
-                & pyrogram.filters.user(self.allowed_user_ids),
-            )
-        )
-        self.bot.add_handler(
-            MessageHandler(
-                help_command,
-                filters=pyrogram.filters.command(["start"])
                 & pyrogram.filters.user(self.allowed_user_ids),
             )
         )
@@ -935,9 +935,9 @@ def format_forward_ids(message: pyrogram.types.Message) -> str:
         if getattr(fchat, "username", None):
             lines.append(f"username: @{fchat.username}")
             lines.append(f"链接: https://t.me/{fchat.username}/{fmid}")
-        else:
+        elif abs(raw_id) >= 10**12:
             internal = abs(raw_id) - 10**12
-        lines.append(f"链接: https://t.me/c/{internal}/{fmid}")
+            lines.append(f"链接: https://t.me/c/{internal}/{fmid}")
         lines.append(f"chat_id: {raw_id}")
         lines.append(f"消息 id: {fmid}")
     elif fuser is not None:
@@ -1057,9 +1057,8 @@ async def forward_ids_text(
                 _t("Send destination now: a chat link/id, or 【本机】 for server disk. /cancel aborts."),
             )
         elif act == "help":
-            await client.send_message(
-                uid, await send_help_str(client, uid), reply_markup=ux_reply_markup()
-            )
+            await send_help_str(client, uid)
+            await client.send_message(uid, ux_status_text(uid), reply_markup=ux_reply_markup())
         return
 
     # ---- 目的地设置捕获 ----
@@ -1071,7 +1070,7 @@ async def forward_ids_text(
             await client.send_message(uid, _t("Destination setup cancelled."))
             return
         if low in ("本机", "disk", "本机磁盘") or text.strip("【】 ") in ("本机", "disk", "本机磁盘"):
-            ctx["dst"] = {"type": "disk", "title": _t("Destination: server disk")}
+            ctx["dst"] = {"type": "disk", "title": _t("server disk")}
         else:
             try:
                 chat = await _bot.client.get_chat(text)
@@ -1192,6 +1191,33 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
     """
 
     if not message.text or not message.text.startswith("https://t.me"):
+        return
+    ctx = _bot.get_user_ctx(message.from_user.id)
+    if ctx.get("await_dst"):
+        # await_dst 态:t.me 链接是目的地输入,不是下载请求
+        try:
+            chat = await client.get_chat(message.text.strip())
+            title = getattr(chat, "title", None) or getattr(
+                chat, "first_name", "?"
+            )
+            ctx["dst"] = {
+                "type": "chat",
+                "id": chat.id,
+                "title": title,
+                "username": getattr(chat, "username", None),
+            }
+            ctx["await_dst"] = False
+            _bot.update_config()
+            await client.send_message(
+                message.from_user.id,
+                _t("Destination locked") + ": " + title,
+                reply_markup=ux_reply_markup(),
+            )
+        except Exception as e:
+            await client.send_message(
+                message.from_user.id,
+                _t("Destination verify failed") + f": {e}",
+            )
         return
 
     msg = (
