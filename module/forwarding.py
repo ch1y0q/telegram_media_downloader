@@ -95,10 +95,12 @@ def plan_units(messages: Iterable[Any], group_mode: str = "keep") -> list[list[A
 
 def validate_request(src, dst, list_of_msg_ids):
     """Validate the execution contract before any Telegram operation."""
-    for peer in (src, dst):
+    for index, peer in enumerate((src, dst)):
         if type(peer) is int:
-            if not -(2**63) < peer < 0:
-                raise ValueError("expected a negative chat ID")
+            if not 0 < abs(peer) < 2**63 or (index == 1 and peer > 0):
+                raise ValueError(
+                    "expected a source peer or negative destination chat ID"
+                )
         elif not isinstance(peer, str) or not re.fullmatch(
             r"@[A-Za-z][A-Za-z0-9_]{3,31}", peer
         ):

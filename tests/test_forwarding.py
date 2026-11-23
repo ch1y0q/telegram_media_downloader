@@ -158,7 +158,8 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
                 await self.run_request(ids)
         for src, dst in [
             (True, "@target"),
-            (1, "@target"),
+            (0, "@target"),
+            ("@source", 1),
             ("me", "@target"),
             ("@bad/user", "@target"),
             ("@source", "@SOURCE"),
@@ -183,6 +184,19 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.run_request()
         self.client.get_messages.assert_not_awaited()
+
+    async def test_numeric_bot_source_is_supported_without_allowing_user_destinations(
+        self,
+    ):
+        self.client.get_chat.side_effect = lambda peer, **kw: types.SimpleNamespace(
+            id=peer, has_protected_content=False
+        )
+        self.messages[3] = message(3, chat=types.SimpleNamespace(id=880))
+        result = await self.api.forward_messages(880, -1002, [3], client=self.client)
+        self.assertEqual(result["sent"], 1)
+        self.messages[3].copy.assert_awaited_once_with(-1002, reply_markup=None)
+        with self.assertRaises(ValueError):
+            self.api.validate_request(880, 990, [3])
 
     async def test_missing_and_service_messages_reported_without_expansion(self):
         self.client.get_messages.side_effect = None
