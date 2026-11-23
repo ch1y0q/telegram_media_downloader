@@ -205,6 +205,64 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["failed"], [{"id": 1, "error": "ValueError"}])
         extra.copy.assert_not_awaited()
 
+    async def test_private_range_skips_other_dialogs_without_failing_valid_items(self):
+        self.client.get_chat.side_effect = lambda peer, **kw: types.SimpleNamespace(
+            id=880 if peer == "@source" else -1002, has_protected_content=False
+        )
+        for mid in range(1, 91):
+            self.messages[mid] = message(
+                mid,
+                empty=29 <= mid <= 78,
+                chat=types.SimpleNamespace(id=880 if mid <= 78 else 999),
+            )
+        result = await self.run_request(list(range(1, 91)))
+        self.assertEqual(
+            result,
+            dict(
+                requested=90,
+                sent=28,
+                missing=list(range(29, 91)),
+                failed=[],
+                skipped_other_chat=list(range(79, 91)),
+            ),
+        )
+        self.client.get_messages.assert_awaited_once()
+        for mid, item in self.messages.items():
+            if mid <= 28:
+                item.copy.assert_awaited_once()
+            else:
+                item.copy.assert_not_awaited()
+                item.forward.assert_not_awaited()
+
+    async def test_other_dialog_is_an_album_boundary_in_both_send_modes(self):
+        for drop_author in (True, False):
+            with self.subTest(drop_author=drop_author):
+                self.messages = {1: media(1), 2: media(2, chat=999), 3: media(3)}
+                result = await self.run_request([1, 2, 3], drop_author=drop_author)
+                self.assertEqual(
+                    result,
+                    dict(
+                        requested=3,
+                        sent=2,
+                        missing=[2],
+                        failed=[],
+                        skipped_other_chat=[2],
+                    ),
+                )
+                self.messages[2].copy.assert_not_awaited()
+                self.messages[2].forward.assert_not_awaited()
+                self.client.send_media_group.assert_not_awaited()
+                self.client.forward_messages.assert_not_awaited()
+
+    async def test_duplicate_response_cannot_bypass_other_dialog_check(self):
+        foreign, own = message(1, chat=types.SimpleNamespace(id=999)), message(1)
+        self.client.get_messages.side_effect = None
+        self.client.get_messages.return_value = [foreign, own]
+        result = await self.run_request([1])
+        self.assertEqual(result["failed"], [{"id": 1, "error": "ValueError"}])
+        foreign.copy.assert_not_awaited()
+        own.copy.assert_not_awaited()
+
     async def test_fetch_failure_has_no_history_fallback(self):
         self.client.get_messages.side_effect = RuntimeError("private error details")
         result = await self.run_request([1, 3])

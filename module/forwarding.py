@@ -400,24 +400,29 @@ async def _selected(client, source_id, ids, batch_size):
             )
             fetched = fetched if isinstance(fetched, (list, tuple)) else [fetched]
             found = {}
+            other_chat = set()
             for m in fetched:
                 if m is None or getattr(m, "empty", False):
                     continue
-                if (
-                    type(m.id) is not int
-                    or m.id not in batch
-                    or m.id in found
-                    or _chat_id(m) not in (None, source_id)
-                ):
+                if type(m.id) is not int or m.id not in batch or m.id in found:
                     raise ValueError("unexpected source message")
-                found[m.id] = m
+                if _chat_id(m) not in (None, source_id):
+                    # Non-channel IDs are account-wide. GetMessages may return
+                    # another dialog's item inside an explicitly selected range.
+                    # Keep its slot as a barrier, without rejecting valid peers.
+                    other_chat.add(m.id)
+                    found[m.id] = None
+                else:
+                    found[m.id] = m
         except Exception as exc:
             for mid in batch:
                 yield mid, None, type(exc).__name__
             continue
         for mid in batch:
             m = found.get(mid)
-            yield mid, m if _available(m) else None, None
+            yield mid, m if _available(m) else None, (
+                "SourceChatMismatch" if mid in other_chat else None
+            )
 
 
 async def forward_messages(
@@ -453,13 +458,12 @@ async def forward_messages(
 
     async def progress():
         if on_progress is not None:
-            await on_progress(
-                dict(
-                    result,
-                    failed=list(result["failed"]),
-                    missing=list(result["missing"]),
-                )
+            snapshot = dict(
+                result, failed=list(result["failed"]), missing=list(result["missing"])
             )
+            if "skipped_other_chat" in result:
+                snapshot["skipped_other_chat"] = list(result["skipped_other_chat"])
+            await on_progress(snapshot)
 
     async def deliver(unit):
         try:
@@ -483,7 +487,10 @@ async def forward_messages(
         for unit in planner.feed(message):
             await deliver(unit)
         if message is None:
-            if error:
+            if error == "SourceChatMismatch":
+                result["missing"].append(mid)
+                result.setdefault("skipped_other_chat", []).append(mid)
+            elif error:
                 result["failed"].append({"id": mid, "error": error})
             else:
                 result["missing"].append(mid)
