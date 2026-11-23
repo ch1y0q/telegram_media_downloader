@@ -93,7 +93,7 @@ def plan_units(messages: Iterable[Any], group_mode: str = "keep") -> list[list[A
     return units + planner.feed(None)
 
 
-def validate_request(src, dst, list_of_msg_ids):
+def validate_request(src, dst, list_of_msg_ids, *, whole_dialog=False):
     """Validate the execution contract before any Telegram operation."""
     for index, peer in enumerate((src, dst)):
         if type(peer) is int:
@@ -107,9 +107,12 @@ def validate_request(src, dst, list_of_msg_ids):
             raise ValueError("expected a normalized chat ID or username")
     if str(src).lower() == str(dst).lower():
         raise ValueError("source and destination must differ")
+    if type(whole_dialog) is not bool:
+        raise ValueError("invalid whole-dialog option")
     if (
         not isinstance(list_of_msg_ids, list)
-        or not 1 <= len(list_of_msg_ids) <= MAX_MESSAGES
+        or not list_of_msg_ids
+        or (not whole_dialog and len(list_of_msg_ids) > MAX_MESSAGES)
     ):
         raise ValueError("expected a bounded nonempty message ID list")
     if any(
@@ -119,6 +122,12 @@ def validate_request(src, dst, list_of_msg_ids):
         raise ValueError("invalid message ID")
     if len(set(list_of_msg_ids)) != len(list_of_msg_ids):
         raise ValueError("message IDs must be unique")
+    if whole_dialog and (
+        type(src) is not int
+        or type(dst) is not int
+        or list_of_msg_ids != sorted(list_of_msg_ids)
+    ):
+        raise ValueError("whole-dialog plans require numeric peers and ordered IDs")
 
 
 async def _flood_retry(operation):
@@ -436,14 +445,15 @@ async def forward_messages(
     sequential=False,
     drop_author=True,
     group_mode="keep",
-    on_progress=None
+    on_progress=None,
+    whole_dialog=False
 ):
     """Forward exact IDs with an already connected client.
 
     The caller owns authorization, session exclusivity and cancellation. No history,
     dialog listing, reply expansion, album expansion, source deletion or config writes.
     """
-    validate_request(src, dst, list_of_msg_ids)
+    validate_request(src, dst, list_of_msg_ids, whole_dialog=whole_dialog)
     if type(sequential) is not bool or type(drop_author) is not bool:
         raise ValueError("invalid forwarding options")
     planner = _Planner(group_mode)

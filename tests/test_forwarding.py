@@ -106,6 +106,34 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
             msg.forward.assert_not_awaited()
         self.client.download_media.assert_not_awaited()
 
+    async def test_whole_dialog_explicit_snapshot_can_exceed_selection_limit(self):
+        self.client.get_chat.side_effect = lambda peer, **kw: types.SimpleNamespace(
+            id=peer, has_protected_content=False
+        )
+        with patch.object(self.api, "MAX_MESSAGES", 2):
+            with self.assertRaises(ValueError):
+                self.api.validate_request(-1001, -1002, [1, 2, 3])
+            result = await self.api.forward_messages(
+                -1001,
+                -1002,
+                [1, 2, 3],
+                client=self.client,
+                whole_dialog=True,
+                sequential=True,
+            )
+        self.assertEqual(result["sent"], 3)
+        self.client.get_messages.assert_awaited_once_with(
+            -1001, message_ids=[1, 2, 3], replies=0
+        )
+        for source, ids, flag in (
+            ("@source", [1, 2], True),
+            (-1001, [2, 1], True),
+            (-1001, [1, 1], True),
+            (-1001, [1], 1),
+        ):
+            with self.assertRaises(ValueError):
+                self.api.validate_request(source, -1002, ids, whole_dialog=flag)
+
     async def test_batches_never_expand_holes(self):
         ids = list(range(1, 403, 2))
         result = await self.run_request(ids)
