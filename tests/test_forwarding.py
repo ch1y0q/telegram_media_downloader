@@ -818,5 +818,63 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sleep.await_count, 2)
 
 
+class PhotoFilenameTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_sdk_uploads_downloaded_album_photos_with_jpeg_names(self):
+        from pyrogram import Client, raw
+        from pyrogram.parser import Parser
+
+        api = load_executor()
+        sdk = object.__new__(Client)
+        sdk.parser, sdk.rnd_id = Parser(None), lambda: 1
+        sdk.resolve_peer = AsyncMock(return_value=raw.types.InputPeerSelf())
+        filenames, uploads, paths = [], [], []
+
+        async def download(selected, file_name):
+            paths.append(Path(file_name))
+            Path(file_name).write_bytes(b'jpeg')
+            return file_name
+
+        async def save_file(path, **kwargs):
+            name = Path(path).name
+            filenames.append(name)
+            return raw.types.InputFile(id=1, parts=1, name=name, md5_checksum='')
+
+        async def invoke(request, **kwargs):
+            if isinstance(request, raw.functions.messages.UploadMedia):
+                uploads.append(request)
+                # Telegram rejects an uploaded photo with an extensionless filename.
+                self.assertEqual(Path(request.media.file.name).suffix, '.jpg')
+                return types.SimpleNamespace(photo=types.SimpleNamespace(id=len(uploads),access_hash=2,file_reference=b'fixture'))
+            self.assertIsInstance(request, raw.functions.messages.SendMultiMedia)
+            return types.SimpleNamespace(updates=[],users=[],chats=[])
+
+        sdk.download_media = AsyncMock(side_effect=download)
+        sdk.save_file = AsyncMock(side_effect=save_file)
+        sdk.invoke = AsyncMock(side_effect=invoke)
+        with patch('pyrogram.utils.parse_messages', AsyncMock(return_value=[sent(7),sent(8)])):
+            result = await api.send_unit(sdk,[media(7),media(8)],-1002,protected=True)
+        self.assertEqual(len(result),2)
+        self.assertEqual(filenames,['photo.jpg','photo.jpg'])
+        self.assertEqual(len(uploads),2)
+        self.assertNotEqual(paths[0].parent,paths[1].parent)
+        self.assertTrue(all(not path.exists() for path in paths))
+
+    async def test_photo_metadata_cannot_remove_the_upload_extension(self):
+        import tempfile
+        api=load_executor()
+        client=types.SimpleNamespace()
+        async def download(selected,file_name):
+            Path(file_name).write_bytes(b'jpeg')
+            return file_name
+        client.download_media=AsyncMock(side_effect=download)
+        for name in (None,'media','../../unsafe.bin','bad.exe'):
+            with self.subTest(name=name),tempfile.TemporaryDirectory() as folder:
+                item=media(7)
+                item.photo.file_name=name
+                path=await api._download(client,item,'photo',folder)
+                self.assertEqual(Path(path).name,'photo.jpg')
+                self.assertEqual(Path(path).parent,Path(folder))
+
+
 if __name__ == "__main__":
     unittest.main()

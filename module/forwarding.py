@@ -301,8 +301,13 @@ def _media_options(message, kind):
 async def _download(client, message, kind, folder, progress=None):
     # Separate private folders allow equal basenames without overwriting a member.
     media = getattr(message, kind)
-    name = os.path.basename(getattr(media, "file_name", None) or "media")
-    target = os.path.join(folder, name if name not in ("", ".", "..") else "media")
+    # Telegram Photo has no file_name; UploadMedia rejects a nameless extension.
+    # Photos are downloaded as JPEG by the SDK. Keep document filenames intact.
+    fallback = "photo.jpg" if kind == "photo" else "media"
+    name = os.path.basename(getattr(media, "file_name", None) or fallback)
+    if kind == "photo" or name in ("", ".", ".."):
+        name = fallback
+    target = os.path.join(folder, name)
     # Pass the exact media, not the message: some SDKs prefer its replied-to story.
     options = {}
     if progress is not None:
