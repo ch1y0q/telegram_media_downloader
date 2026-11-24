@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import tempfile
+import time
 import traceback
 import uuid
 from collections import defaultdict
@@ -140,7 +141,40 @@ def validate_request(src, dst, list_of_msg_ids, *, whole_dialog=False):
         raise ValueError("whole-dialog plans require numeric peers and ordered IDs")
 
 
-async def _flood_retry(operation):
+class _TransferProgress:
+    """Optional telemetry must never turn an accepted send into a failed send."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self.state = {}
+        self.started = time.monotonic()
+        self.last_emit = float("-inf")
+
+    async def stage(self, name, **values):
+        self.started = time.monotonic()
+        self.state = dict(stage=name, **values)
+        await self.emit(force=True)
+
+    async def emit(self, force=False):
+        now = time.monotonic()
+        if self.callback is None or (not force and now - self.last_emit < 2):
+            return
+        self.last_emit = now
+        try:
+            await self.callback(dict(self.state, elapsed=max(0, now - self.started)))
+        except Exception:
+            pass  # Progress display is advisory; cancellation still propagates.
+
+    async def bytes(self, current, total):
+        expected = self.state.get("total") or total or 0
+        if current < self.state.get("current", 0):
+            self.started = time.monotonic()  # SDK restarted a transfer.
+        self.state.update(current=min(current, expected) if expected else current,
+                          total=expected)
+        await self.emit()
+
+
+async def _flood_retry(operation, progress=None):
     for attempt in range(3):
         try:
             return await operation()
@@ -153,7 +187,14 @@ async def _flood_retry(operation):
             delay = max(1, int(getattr(exc, "value", 1)))
             if delay > MAX_FLOOD_WAIT_SECONDS:
                 raise
+            previous = None
+            if progress is not None:
+                previous = (dict(progress.state), progress.started)
+                await progress.stage("flood_wait", seconds=delay)
             await asyncio.sleep(delay)
+            if previous is not None:
+                progress.state, progress.started = previous
+                await progress.emit(force=True)
     raise RuntimeError("retry exhausted")
 
 
@@ -167,7 +208,7 @@ async def _once(operation):
     return await operation()
 
 
-def _unit_client(client):
+def _unit_client(client, progress=None):
     """Scope SDK retry/parser changes to this send, never mutate a shared client."""
     from pyrogram import Client, enums, utils
 
@@ -198,7 +239,24 @@ def _unit_client(client):
 
     async def invoke(query, **kwargs):
         kwargs.update(retries=0, sleep_threshold=0)
-        return await _flood_retry(partial(client.invoke, query, **kwargs))
+        return await _flood_retry(partial(client.invoke, query, **kwargs), progress)
+
+    if progress is not None:
+        original_save = scoped.save_file
+
+        async def save_file(path, *args, **kwargs):
+            # Album uploads call save_file directly and expose no progress argument.
+            # Ignore optional absent thumbnails, preserving the main-file status.
+            if path is None:
+                return await original_save(path, *args, **kwargs)
+            await progress.stage("upload", current=0,
+                                 total=os.path.getsize(path) if isinstance(path, str) else 0)
+            kwargs.update(progress=progress.bytes, progress_args=())
+            value = await original_save(path, *args, **kwargs)
+            await progress.stage("confirm")
+            return value
+
+        scoped.save_file = save_file
 
     scoped.parser.parse = parse
     scoped.invoke = invoke
@@ -240,13 +298,17 @@ def _media_options(message, kind):
     return kwargs
 
 
-async def _download(client, message, kind, folder):
+async def _download(client, message, kind, folder, progress=None):
     # Separate private folders allow equal basenames without overwriting a member.
     media = getattr(message, kind)
     name = os.path.basename(getattr(media, "file_name", None) or "media")
     target = os.path.join(folder, name if name not in ("", ".", "..") else "media")
     # Pass the exact media, not the message: some SDKs prefer its replied-to story.
-    path = await _flood_retry(partial(client.download_media, media, file_name=target))
+    options = {}
+    if progress is not None:
+        await progress.stage("download", current=0, total=getattr(media, "file_size", 0) or 0)
+        options["progress"] = progress.bytes
+    path = await _flood_retry(partial(client.download_media, media, file_name=target, **options), progress)
     if (
         not isinstance(path, str)
         or os.path.realpath(path) != os.path.realpath(target)
@@ -315,7 +377,7 @@ def _confirmed(response, count, dst) -> list[Any]:
 
 
 async def send_unit(
-    client, messages, dst, *, drop_author=True, protected=False
+    client, messages, dst, *, drop_author=True, protected=False, on_status=None
 ) -> list[Any]:
     """Send an already received/planned unit exactly once except explicit FloodWait."""
     unit = list(messages)
@@ -341,10 +403,13 @@ async def send_unit(
     ]
     if any(protected_media) and not drop_author:
         raise ValueError("protected media cannot retain its forwarding header")
-    scoped = _unit_client(client)
+    progress = _TransferProgress(on_status) if on_status is not None else None
+    scoped = _unit_client(client, progress)
+    if progress is not None:
+        await progress.stage("copy")
     # Real SDK RPCs retry in scoped.invoke. Never replay a high-level send if
     # result parsing encounters a FloodWait *after* Telegram accepted the send.
-    send = _flood_retry if scoped is client else _once
+    send = partial(_flood_retry, progress=progress) if scoped is client else _once
     if len(unit) == 1:
         m = unit[0]
         kind = media_kind(m)
@@ -352,7 +417,7 @@ async def send_unit(
             if kind is None:
                 raise ValueError("unsupported protected media")
             with tempfile.TemporaryDirectory(prefix="telegram-forward-") as folder:
-                path = await _download(scoped, m, kind, folder)
+                path = await _download(scoped, m, kind, folder, progress)
                 response = await send(
                     partial(
                         getattr(scoped, "send_" + kind),
@@ -389,7 +454,7 @@ async def send_unit(
                     folder = stack.enter_context(
                         tempfile.TemporaryDirectory(prefix="telegram-forward-")
                     )
-                    value = await _download(scoped, m, kind, folder)
+                    value = await _download(scoped, m, kind, folder, progress)
                 else:
                     value = _cached_id(m, kind)
                 media.append(_input_media(m, kind, value))
@@ -402,12 +467,14 @@ async def send_unit(
     return confirmed
 
 
-async def _selected(client, source_id, ids, batch_size):
+async def _selected(client, source_id, ids, batch_size, progress=None):
     """Yield one slot per requested ID, including fetch failures and missing slots."""
     for start in range(0, len(ids), batch_size):
         batch = ids[start : start + batch_size]
         try:
-            scoped = _unit_client(client)
+            if progress is not None:
+                await progress.stage("read")
+            scoped = _unit_client(client, progress)
             # Enter get_messages exactly once for this batch; any nested calls made
             # by its result parser hit the instance-level omit_messages instead.
             fetch = (
@@ -415,7 +482,7 @@ async def _selected(client, source_id, ids, batch_size):
                 if scoped is client
                 else partial(type(scoped).get_messages, scoped)
             )
-            read = _flood_retry if scoped is client else _once
+            read = partial(_flood_retry, progress=progress) if scoped is client else _once
             fetched = await read(
                 partial(fetch, source_id, message_ids=batch, replies=0)
             )
@@ -457,7 +524,8 @@ async def forward_messages(
     drop_author=True,
     group_mode="keep",
     on_progress=None,
-    whole_dialog=False
+    whole_dialog=False,
+    on_status=None
 ):
     """Forward exact IDs with an already connected client.
 
@@ -471,6 +539,9 @@ async def forward_messages(
     if group_mode == "force" and not drop_author:
         raise ValueError("force grouping requires drop_author=True")
     list_of_msg_ids = list(list_of_msg_ids)
+    transfer = _TransferProgress(on_status) if on_status is not None else None
+    if transfer is not None:
+        await transfer.stage("read")
     source = await client.get_chat(src, force_full=False)
     destination = await client.get_chat(dst, force_full=False)
     if source.id == destination.id:
@@ -496,6 +567,7 @@ async def forward_messages(
                 destination.id,
                 drop_author=drop_author,
                 protected=protected,
+                **({"on_status": on_status} if on_status is not None else {}),
             )
             result["sent"] += len(sent)
             result["receipts"].extend({"source": original.id, "chat": destination.id, "id": target.id}
@@ -506,7 +578,7 @@ async def forward_messages(
         await progress()
 
     async for mid, message, error in _selected(
-        client, source.id, list_of_msg_ids, batch_size
+        client, source.id, list_of_msg_ids, batch_size, transfer
     ):
         for unit in planner.feed(message):
             await deliver(unit)
