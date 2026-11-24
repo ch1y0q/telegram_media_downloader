@@ -101,6 +101,11 @@ logging.getLogger("pyrogram.client").addFilter(LogFilter())
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 
+def _download_size_matches(actual_size: int, expected_size: int) -> bool:
+    """Unknown or empty sizes cannot establish a complete download."""
+    return type(expected_size) is int and expected_size > 0 and actual_size == expected_size
+
+
 def _check_download_finish(media_size: int, download_path: str, ui_file_name: str):
     """Check download task if finish
 
@@ -115,7 +120,7 @@ def _check_download_finish(media_size: int, download_path: str, ui_file_name: st
 
     """
     download_size = os.path.getsize(download_path)
-    if media_size == download_size:
+    if _download_size_matches(download_size, media_size):
         logger.success(f"{_t('Successfully downloaded')} - {ui_file_name}")
     else:
         logger.warning(
@@ -441,7 +446,7 @@ async def download_media(
             if _can_download(_type, file_formats, file_format):
                 if _is_exist(file_name):
                     file_size = os.path.getsize(file_name)
-                    if file_size or file_size == media_size:
+                    if _download_size_matches(file_size, media_size):
                         logger.info(
                             f"id={message.id} {ui_file_name} "
                             f"{_t('already download,download skipped')}.\n"
@@ -464,12 +469,24 @@ async def download_media(
 
     message_id = message.id
 
+    async def media_progress(current, total, *args):
+        # This SDK discards metadata when given a media object (total becomes 0).
+        # Keep the original size and the SDK's final-chunk clamping behavior.
+        if type(media_size) is int and media_size > 0:
+            current, total = min(current, media_size), media_size
+        await update_download_status(current, total, *args)
+
     for retry in range(3):
         try:
+            # Refetch on retry may replace the file reference. Select anew,
+            # and never let the SDK substitute a replied-to story.
+            selected_media = getattr(message, _type, None)
+            if selected_media is None:
+                return DownloadStatus.FailedDownload, None
             temp_download_path = await client.download_media(
-                message,
+                selected_media,
                 file_name=temp_file_name,
-                progress=update_download_status,
+                progress=media_progress,
                 progress_args=(
                     message_id,
                     ui_file_name,
@@ -711,7 +728,7 @@ async def download_chat_task(
     if chat_download_config.ids_to_retry:
         logger.info(f"{_t('Downloading files failed during last run')}...")
         skipped_messages: list = await client.get_messages(  # type: ignore
-            chat_id=node.chat_id, message_ids=chat_download_config.ids_to_retry
+            chat_id=node.chat_id, message_ids=chat_download_config.ids_to_retry, replies=0
         )
 
         for message in skipped_messages:
@@ -752,7 +769,7 @@ async def download_chat_task_sequential(
     if chat_download_config.ids_to_retry:
         logger.info(f"{_t('Downloading files failed during last run')}...")
         skipped_messages: list = await client.get_messages(  # type: ignore
-            chat_id=node.chat_id, message_ids=chat_download_config.ids_to_retry
+            chat_id=node.chat_id, message_ids=chat_download_config.ids_to_retry, replies=0
         )
         for message in skipped_messages:
             await _process_chat_message_for_download(

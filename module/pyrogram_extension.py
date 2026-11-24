@@ -1296,6 +1296,7 @@ async def fetch_message(client: pyrogram.Client, message: pyrogram.types.Message
     return await client.get_messages(
         chat_id=message.chat.id,
         message_ids=message.id,
+        replies=0,
     )
 
 
