@@ -601,6 +601,12 @@ async def worker(client: pyrogram.client.Client):
                 await download_task(client, message, node)
         except Exception as e:
             logger.exception(f"{e}")
+            if item is not None:
+                message, node = item
+                node.download_status[message.id] = DownloadStatus.FailedDownload
+                if not node.bot:
+                    app.set_download_id(node, message.id, DownloadStatus.FailedDownload)
+                await upload_queue.put((client, message, node, DownloadStatus.FailedDownload, None, 0))
         finally:
             if item is not None:
                 queue.task_done()
@@ -626,6 +632,8 @@ async def upload_worker():
             async with upload_queue_condition:
                 upload_queue_condition.notify_all()
             client, message, node, download_status, file_name, file_size = item
+            if node.is_stop_transmission:
+                continue
             await upload_telegram_chat(
                 client,
                 node.upload_user if node.upload_user else client,
@@ -639,7 +647,8 @@ async def upload_worker():
             )
 
             if (
-                not node.upload_telegram_chat_id
+                not node.is_stop_transmission
+                and not node.upload_telegram_chat_id
                 and download_status is DownloadStatus.SuccessDownload
                 and app.cloud_drive_config.enable_upload_file
             ):

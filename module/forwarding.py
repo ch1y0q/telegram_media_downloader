@@ -4,6 +4,8 @@ import asyncio
 import os
 import re
 import tempfile
+import traceback
+import uuid
 from collections import defaultdict
 from contextlib import ExitStack
 from copy import copy
@@ -30,6 +32,14 @@ FAMILIES = {
     "document": "document",
     "audio": "audio",
 }
+
+
+def failure_detail(exc, stage):
+    """Diagnostics deliberately omit exception text, source lines and locals."""
+    return {"error": type(exc).__name__, "stage": stage, "retryable": stage == "read",
+            "diagnostic": uuid.uuid4().hex[:12],
+            "frames": [f"{os.path.basename(frame.filename)}:{frame.lineno}:{frame.name}"
+                       for frame in traceback.extract_tb(exc.__traceback__)[-8:]]}
 
 
 def media_kind(message) -> Optional[str]:
@@ -426,8 +436,9 @@ async def _selected(client, source_id, ids, batch_size):
                 else:
                     found[m.id] = m
         except Exception as exc:
+            detail = failure_detail(exc, "read")
             for mid in batch:
-                yield mid, None, type(exc).__name__
+                yield mid, None, detail
             continue
         for mid in batch:
             m = found.get(mid)
@@ -465,13 +476,13 @@ async def forward_messages(
     if source.id == destination.id:
         raise ValueError("source and destination must differ")
     protected = bool(getattr(source, "has_protected_content", False))
-    result = {"requested": len(list_of_msg_ids), "sent": 0, "missing": [], "failed": []}
+    result = {"requested": len(list_of_msg_ids), "sent": 0, "missing": [], "failed": [], "receipts": []}
     batch_size = 1 if sequential and group_mode == "split" else 100
 
     async def progress():
         if on_progress is not None:
             snapshot = dict(
-                result, failed=list(result["failed"]), missing=list(result["missing"])
+                result, failed=list(result["failed"]), missing=list(result["missing"]), receipts=list(result["receipts"])
             )
             if "skipped_other_chat" in result:
                 snapshot["skipped_other_chat"] = list(result["skipped_other_chat"])
@@ -487,10 +498,11 @@ async def forward_messages(
                 protected=protected,
             )
             result["sent"] += len(sent)
+            result["receipts"].extend({"source": original.id, "chat": destination.id, "id": target.id}
+                                      for original, target in zip(unit, sent))
         except Exception as exc:
-            result["failed"].extend(
-                {"id": m.id, "error": type(exc).__name__} for m in unit
-            )
+            detail = failure_detail(exc, "send")
+            result["failed"].extend(dict(detail, id=m.id) for m in unit)
         await progress()
 
     async for mid, message, error in _selected(
@@ -503,7 +515,7 @@ async def forward_messages(
                 result["missing"].append(mid)
                 result.setdefault("skipped_other_chat", []).append(mid)
             elif error:
-                result["failed"].append({"id": mid, "error": error})
+                result["failed"].append(dict(error, id=mid))
             else:
                 result["missing"].append(mid)
             await progress()

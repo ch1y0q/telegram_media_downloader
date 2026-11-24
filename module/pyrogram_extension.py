@@ -218,69 +218,65 @@ async def send_message_by_language(
     )
 
 
-async def download_thumbnail(
-    client: pyrogram.Client,
-    temp_path: str,
-    message: pyrogram.types.Message,
-):
-    """Downloads the thumbnail of a video message to a temporary file.
+async def download_thumbnail(client, temp_path, message):
+    """Retry with refreshed thumbnail references and remove failed partial files."""
+    if not message.video or not message.video.thumbs:
+        return None
+    target = os.path.join(temp_path, "thumbnail", f"thumb-{secrets.token_hex(16)}.jpg")
+    for attempt in range(3):
+        completed = False
+        try:
+            message = await fetch_message(client, message)
+            thumbnail = message.video.thumbs[0] if message.video and message.video.thumbs else None
+            if thumbnail is None:
+                return None
+            path = await client.download_media(thumbnail, file_name=target)
+            if path == target and os.path.isfile(target) and os.path.getsize(target) == thumbnail.file_size > 0:
+                completed = True
+                return target
+        except Exception:
+            logger.warning("Thumbnail attempt {} failed", attempt + 1)
+        finally:
+            if not completed and os.path.isfile(target):
+                os.remove(target)
+        if attempt < 2:
+            await asyncio.sleep(2)
+    return None
 
-    Args:
-        client: A Pyrogram client instance.
-        temp_path: The path to a temporary directory where the thumbnail file
-                   will be stored.
-        message: A Pyrogram Message object representing the video message.
 
-    Returns:
-        A string representing the path of the thumbnail file, or None if the
-        download failed.
+class UploadStopped(Exception):
+    """The task was cancelled before sending."""
 
-    Raises:
-        ValueError: If the downloaded thumbnail file size doesn't match the
-                    expected file size.
-    """
-    thumbnail_file = None
-    if message.video.thumbs:
-        message = await fetch_message(client, message)
-        thumbnail = message.video.thumbs[0] if message.video.thumbs else None
-        unique_name = os.path.join(
-            temp_path,
-            "thumbnail",
-            f"thumb-{int(time.time())}-{secrets.token_hex(8)}.jpg",
-        )
 
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
+def check_upload_active(node):
+    if node.is_stop_transmission:
+        raise UploadStopped()
+
+
+def confirmed_upload(response, count, destination):
+    items = list(response) if isinstance(response, (list, tuple)) else [response]
+    ids = [getattr(item, "id", None) for item in items]
+    if (len(items) != count or any(type(mid) is not int or mid <= 0 for mid in ids)
+            or len(set(ids)) != count or any(getattr(item, "empty", False) for item in items)
+            or (type(destination) is int and any(
+                getattr(getattr(item, "chat", None), "id", None) != destination for item in items))):
+        raise RuntimeError("upload outcome unconfirmed")
+    return items
+
+
+def clean_confirmed_files(node, ids):
+    pending = getattr(node, "pending_upload_files", {})
+    for mid in ids:
+        path = pending.get(mid)
+        if path:
             try:
-                thumbnail_file = await client.download_media(
-                    thumbnail, file_name=unique_name
-                )
-
-                if os.path.getsize(thumbnail_file) == thumbnail.file_size:
-                    break
-
-                raise ValueError(
-                    f"Thumbnail file size is {os.path.getsize(thumbnail_file)}"
-                    f" bytes, actual {thumbnail.file_size}: {thumbnail_file}"
-                )
-
-            except Exception as e:
-                if attempt == max_attempts:
-                    logger.exception(
-                        f"Failed to download thumbnail after {max_attempts}"
-                        f" attempts: {e}"
-                    )
-                else:
-                    message = await fetch_message(client, message)
-                    logger.warning(
-                        f"Attempt {attempt} to download thumbnail failed: {e}"
-                    )
-                    # Wait 2 seconds before retrying
-                    await asyncio.sleep(2)
-
-                thumbnail = None
-                thumbnail_file = None
-    return thumbnail_file
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("Confirmed file could not be cleaned: message_id={}", mid)
+                continue
+            pending.pop(mid, None)
 
 
 async def upload_telegram_chat(
@@ -294,10 +290,16 @@ async def upload_telegram_chat(
     delete_file: bool = True,
 ):
     """Upload telegram chat"""
+    if node.is_stop_transmission:
+        return ForwardStatus.StopForward
+    if file_name and delete_file and app.after_upload_telegram_delete:
+        if not hasattr(node, "pending_upload_files"):
+            node.pending_upload_files = {}
+        node.pending_upload_files[message.id] = file_name
     # upload telegram
     if node.upload_telegram_chat_id:
         if (
-            download_status is DownloadStatus.SkipDownload
+            download_status in (DownloadStatus.SkipDownload, DownloadStatus.FailedDownload)
             and message.media
             and not file_name
         ):
@@ -326,7 +328,7 @@ async def upload_telegram_chat(
             and (file_name or not message.media)
         ):
             try:
-                await upload_telegram_chat_message(
+                result = await upload_telegram_chat_message(
                     client,
                     upload_user,
                     app,
@@ -344,9 +346,10 @@ async def upload_telegram_chat(
                     type(e).__name__,
                     e,
                 )
-            finally:
-                if file_name and delete_file and app.after_upload_telegram_delete:
-                    os.remove(file_name)
+            else:
+                if result is ForwardStatus.SuccessForward:
+                    clean_confirmed_files(node, [message.id])
+                return result
 
             # forward text
             # FIXME: fix upload text
@@ -382,6 +385,7 @@ async def upload_telegram_chat_message(
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
+            check_upload_active(node)
             forward_status = await _upload_telegram_chat_message(
                 client, upload_user, app, node, message, file_name
             )
@@ -395,6 +399,8 @@ async def upload_telegram_chat_message(
                 size_text,
             )
             break
+        except UploadStopped:
+            return ForwardStatus.StopForward
         except (
             pyrogram.errors.exceptions.flood_420.FloodWait,
             pyrogram.errors.exceptions.flood_420.FloodPremiumWait,
@@ -432,7 +438,8 @@ async def upload_telegram_chat_message(
                     type(e).__name__,
                     e,
                 )
-            return ForwardStatus.FailedForward
+            forward_status = ForwardStatus.FailedForward
+            break
 
     if forward_status != ForwardStatus.CacheForward:
         node.stat_forward(forward_status)
@@ -449,176 +456,48 @@ async def upload_telegram_chat_message(
 
 
 # pylint: disable=R0912
-async def _upload_signal_message(
-    client: pyrogram.Client,
-    upload_user: pyrogram.Client,
-    app: Application,
-    node: TaskNode,
-    upload_telegram_chat_id: Union[int, str, None],
-    message: pyrogram.types.Message,
-    file_name: Optional[str],
-    caption: Optional[str] = None,
-    text: Optional[str] = None,
-):
-    """
-    Uploads a video or message to a Telegram chat.
-
-    Parameters:
-        client (pyrogram.Client): The pyrogram client.
-        upload_telegram_chat_id (Union[int, str]): The ID of the chat to upload to.
-        message (pyrogram.types.Message): The message to upload.
-        file_name (str): The name of the file to upload.
-    """
-    ui_file_name = file_name
-    if file_name:
-        ui_file_name = (
-            f"****{os.path.splitext(file_name)[-1]}"
-            if app.hide_file_name
-            else file_name
-        )
-
-    if message.video:
-        # Download thumbnail
-        thumbnail_file = await download_thumbnail(client, app.temp_save_path, message)
-        try:
-            # TODO(tangyoha): add more log when upload video more than 2000MB failed
-            # Send video to the destination chat
+async def _upload_signal_message(client, upload_user, app, node,
+                                 upload_telegram_chat_id, message, file_name,
+                                 caption=None, text=None):
+    """Dispatch each supported media type explicitly and return its receipt."""
+    check_upload_active(node)
+    kind = next((kind for kind in ("video", "photo", "animation", "audio", "voice",
+                "video_note", "sticker", "document") if getattr(message, kind, None)), None)
+    thumbnail = None
+    options = {"message_thread_id": node.topic_id}
+    try:
+        if kind:
+            media = getattr(message, kind)
+            if kind not in ("video_note", "sticker"):
+                options.update(caption=caption, parse_mode=pyrogram.enums.ParseMode.HTML)
+            if kind == "video":
+                thumbnail = await download_thumbnail(client, app.temp_save_path, message)
+                options.update(thumb=thumbnail, width=media.width, height=media.height, duration=media.duration)
+            elif kind in ("audio", "voice"):
+                if getattr(media, "duration", None) is not None:
+                    options["duration"] = media.duration
+            value = file_name
+            if not value:
+                raise ValueError("local media file required")
             if node.reply_to_message:
-                await node.reply_to_message.reply_video(
-                    file_name,
-                    caption=caption,
-                    message_thread_id=node.topic_id,
-                    thumb=thumbnail_file,
-                    width=message.video.width,
-                    height=message.video.height,
-                    duration=message.video.duration,
-                    parse_mode=pyrogram.enums.ParseMode.HTML,
-                )
+                operation = getattr(node.reply_to_message, "reply_" + kind)
             else:
-                await upload_user.send_video(
-                    upload_telegram_chat_id,
-                    file_name,
-                    thumb=thumbnail_file,
-                    width=message.video.width,
-                    height=message.video.height,
-                    duration=message.video.duration,
-                    caption=caption,
-                    parse_mode=pyrogram.enums.ParseMode.HTML,
-                    progress=update_upload_stat,
-                    progress_args=(
-                        message.id,
-                        ui_file_name,
-                        time.time(),
-                        node,
-                        upload_user,
-                    ),
-                    message_thread_id=node.topic_id,
-                )
-        except Exception as e:
-            raise e
-        finally:
-            if thumbnail_file:
-                os.remove(str(thumbnail_file))
-
-    elif message.photo:
-        if node.reply_to_message:
-            await node.reply_to_message.reply_photo(
-                file_name,
-                caption=caption,
-                message_thread_id=node.topic_id,
-            )
+                operation = getattr(upload_user, "send_" + kind)
+                options.update(progress=update_upload_stat,
+                    progress_args=(message.id, "****" if app.hide_file_name else file_name,
+                                   time.time(), node, upload_user))
+        elif message.text:
+            value = message.text if text is None else text
+            operation = node.reply_to_message.reply if node.reply_to_message else upload_user.send_message
         else:
-            await upload_user.send_photo(
-                upload_telegram_chat_id,
-                file_name,
-                caption=caption,
-                progress=update_upload_stat,
-                progress_args=(
-                    message.id,
-                    ui_file_name,
-                    time.time(),
-                    node,
-                    upload_user,
-                ),
-                message_thread_id=node.topic_id,
-            )
-    elif message.document:
+            raise ValueError("unsupported message type")
+        check_upload_active(node)
         if node.reply_to_message:
-            await node.reply_to_message.reply_document(
-                file_name,
-                caption=caption,
-                message_thread_id=node.topic_id,
-            )
-        else:
-            await upload_user.send_document(
-                upload_telegram_chat_id,
-                file_name,
-                caption=caption,
-                progress=update_upload_stat,
-                progress_args=(
-                    message.id,
-                    ui_file_name,
-                    time.time(),
-                    node,
-                    upload_user,
-                ),
-                message_thread_id=node.topic_id,
-            )
-    elif message.voice:
-        if node.reply_to_message:
-            await node.reply_to_message.reply_voice(
-                file_name,
-                caption=caption,
-                message_thread_id=node.topic_id,
-            )
-        else:
-            await upload_user.send_voice(
-                upload_telegram_chat_id,
-                file_name,
-                caption=caption,
-                progress=update_upload_stat,
-                progress_args=(
-                    message.id,
-                    ui_file_name,
-                    time.time(),
-                    node,
-                    upload_user,
-                ),
-                message_thread_id=node.topic_id,
-            )
-    elif message.video_note:
-        if node.reply_to_message:
-            await node.reply_to_message.reply_video_note(
-                file_name,
-                caption=caption,
-                message_thread_id=node.topic_id,
-            )
-        else:
-            await upload_user.send_video_note(
-                upload_telegram_chat_id,
-                file_name,
-                caption=caption,
-                progress=update_upload_stat,
-                progress_args=(
-                    message.id,
-                    ui_file_name,
-                    time.time(),
-                    node,
-                    upload_user,
-                ),
-                message_thread_id=node.topic_id,
-            )
-    elif message.text:
-        if node.reply_to_message:
-            await node.reply_to_message.reply(
-                message.text if text is None else text, message_thread_id=node.topic_id
-            )
-        else:
-            await upload_user.send_message(
-                upload_telegram_chat_id,
-                message.text if text is None else text,
-                message_thread_id=node.topic_id,
-            )
+            return await operation(value, **options)
+        return await operation(upload_telegram_chat_id, value, **options)
+    finally:
+        if thumbnail and os.path.isfile(thumbnail):
+            os.remove(thumbnail)
 
 
 def truncate_caption(
@@ -812,7 +691,9 @@ async def _upload_telegram_chat_message(
     Returns:
         None
     """
+    check_upload_active(node)
     await app.forward_limit_call.wait(node)
+    check_upload_active(node)
 
     caption = await process_caption(
         client,
@@ -835,68 +716,35 @@ async def _upload_telegram_chat_message(
             node.chat_id, message.media_group_id, message.caption_entities
         )
 
+    check_upload_active(node)
     if not message.media_group_id:
         if not node.has_protected_content:
             if node.reply_to_message:
+                kind = next((kind for kind in ("photo", "video", "animation", "audio", "voice",
+                            "video_note", "sticker", "document") if getattr(message, kind, None)), None)
+                options = {"message_thread_id": node.topic_id}
                 if message.text:
-                    await node.reply_to_message.reply(
-                        message.text,
-                        message_thread_id=node.topic_id,
-                    )
-                elif message.photo:
-                    await node.reply_to_message.reply_photo(
-                        message.photo.file_id,
-                        caption=caption,
-                        message_thread_id=node.topic_id,
-                    )
-                elif message.video:
-                    await node.reply_to_message.reply_video(
-                        message.video.file_id,
-                        caption=caption,
-                        message_thread_id=node.topic_id,
-                    )
-                elif message.document:
-                    await node.reply_to_message.reply_document(
-                        message.document.file_id,
-                        caption=caption,
-                        message_thread_id=node.topic_id,
-                    )
-                elif message.audio:
-                    await node.reply_to_message.reply_audio(
-                        message.audio.file_id,
-                        caption=caption,
-                        message_thread_id=node.topic_id,
-                    )
-            else:
-                if new_text:
-                    await client.send_message(
-                        node.upload_telegram_chat_id,
-                        new_text,
-                        parse_mode=enums.ParseMode.HTML,
-                    )
+                    response = await node.reply_to_message.reply(new_text or message.text, **options)
+                elif kind:
+                    if kind not in ("video_note", "sticker"):
+                        options["caption"] = caption
+                    response = await getattr(node.reply_to_message, "reply_" + kind)(
+                        getattr(message, kind).file_id, **options)
                 else:
-                    await message.copy(
-                        node.upload_telegram_chat_id,
-                        caption=caption,
-                        parse_mode=enums.ParseMode.HTML,
-                    )
+                    raise ValueError("unsupported message type")
+            elif new_text:
+                response = await client.send_message(node.upload_telegram_chat_id, new_text,
+                                                     parse_mode=enums.ParseMode.HTML)
+            else:
+                response = await message.copy(node.upload_telegram_chat_id, caption=caption,
+                                               parse_mode=enums.ParseMode.HTML)
         else:
-            await _upload_signal_message(
-                client,
-                upload_user,
-                app,
-                node,
-                node.upload_telegram_chat_id,
-                message,
-                file_name,
-                caption,
-                new_text,
-            )
+            response = await _upload_signal_message(client, upload_user, app, node,
+                node.upload_telegram_chat_id, message, file_name, caption, new_text)
+        destination = node.reply_to_message.chat.id if node.reply_to_message else node.upload_telegram_chat_id
+        confirmed_upload(response, 1, destination)
         return ForwardStatus.SuccessForward
-
-    return await forward_multi_media(
-        client, upload_user, app, node, message, caption, file_name
-    )
+    return await forward_multi_media(client, upload_user, app, node, message, caption, file_name)
 
 
 # pylint: disable=R0912
@@ -994,13 +842,15 @@ async def proc_cache_forward(
     app: Application,
 ):
     """Process other cache forward"""
+    check_upload_active(node)
     multi_media: List[pyrogram.raw.types.InputSingleMedia] = []
+    sent_source_ids = []
 
     async with node.media_group_ids_lock:
         # Check if the message's media group is valid
         media_group = node.media_group_ids.get(message.media_group_id)
         if not media_group:
-            return
+            return ForwardStatus.SkipForward
 
         # Check if all items are in a valid state for forwarding
         for key, media_item in media_group.items():
@@ -1028,6 +878,7 @@ async def proc_cache_forward(
             # Collect the media items that are valid for forwarding
             if media_item:
                 multi_media.append(media_item)
+                sent_source_ids.append(key)
 
         if len(multi_media) > 1:
             caption_item = None
@@ -1055,14 +906,22 @@ async def proc_cache_forward(
         message_thread_id = node.reply_to_message.message_thread_id
         business_connection_id = node.reply_to_message.business_connection_id
         upload_telegram_chat_id = node.reply_to_message.chat.id
-    if not await send_media_group_v2(
+    if not multi_media:
+        return ForwardStatus.CacheForward
+    check_upload_active(node)
+    response = await send_media_group_v2(
         client,
         upload_telegram_chat_id,  # type: ignore
         multi_media,
         message_thread_id=message_thread_id,
         reply_to_message_id=reply_to_message_id,
-    ):
+    )
+    try:
+        confirmed_upload(response, len(multi_media), upload_telegram_chat_id)
+    except RuntimeError:
         forward_status = ForwardStatus.FailedForward
+    else:
+        clean_confirmed_files(node, sent_source_ids)
 
     node.stat_forward(forward_status, len(multi_media))
 
@@ -1085,7 +944,11 @@ def record_download_status(func):
 
         _download_cache[(node.chat_id, message.id)] = DownloadStatus.Downloading
 
-        status, file_name = await func(client, message, media_types, file_formats, node)
+        try:
+            status, file_name = await func(client, message, media_types, file_formats, node)
+        except BaseException:
+            _download_cache[(node.chat_id, message.id)] = DownloadStatus.FailedDownload
+            raise
 
         _download_cache[(node.chat_id, message.id)] = status
 

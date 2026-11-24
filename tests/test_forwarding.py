@@ -91,7 +91,7 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exact_selection_and_metadata_only(self):
         result = await self.run_request()
-        self.assertEqual(result, dict(requested=4, sent=4, missing=[], failed=[]))
+        self.assertEqual({k: result[k] for k in ("requested", "sent", "missing", "failed")}, dict(requested=4, sent=4, missing=[], failed=[]))
         self.client.get_messages.assert_awaited_once_with(
             -1001, message_ids=[123, 124, 126, 127], replies=0
         )
@@ -244,7 +244,7 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
         self.client.get_messages.return_value = [message(1), extra]
         result = await self.run_request([1])
         self.assertEqual(result["sent"], 0)
-        self.assertEqual(result["failed"], [{"id": 1, "error": "ValueError"}])
+        self.assertEqual([{k: f[k] for k in ("id", "error")} for f in result["failed"]], [{"id": 1, "error": "ValueError"}])
         extra.copy.assert_not_awaited()
 
     async def test_private_range_skips_other_dialogs_without_failing_valid_items(self):
@@ -259,7 +259,7 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
             )
         result = await self.run_request(list(range(1, 91)))
         self.assertEqual(
-            result,
+            {k: v for k, v in result.items() if k != "receipts"},
             dict(
                 requested=90,
                 sent=28,
@@ -282,7 +282,7 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
                 self.messages = {1: media(1), 2: media(2, chat=999), 3: media(3)}
                 result = await self.run_request([1, 2, 3], drop_author=drop_author)
                 self.assertEqual(
-                    result,
+                    {k: v for k, v in result.items() if k != "receipts"},
                     dict(
                         requested=3,
                         sent=2,
@@ -301,7 +301,7 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
         self.client.get_messages.side_effect = None
         self.client.get_messages.return_value = [foreign, own]
         result = await self.run_request([1])
-        self.assertEqual(result["failed"], [{"id": 1, "error": "ValueError"}])
+        self.assertEqual([{k: f[k] for k in ("id", "error")} for f in result["failed"]], [{"id": 1, "error": "ValueError"}])
         foreign.copy.assert_not_awaited()
         own.copy.assert_not_awaited()
 
@@ -319,7 +319,7 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
         result = await self.run_request([1, 2])
         self.messages[1].copy.assert_awaited_once()
         self.assertEqual(result["sent"], 1)
-        self.assertEqual(result["failed"], [{"id": 1, "error": "TimeoutError"}])
+        self.assertEqual([{k: f[k] for k in ("id", "error")} for f in result["failed"]], [{"id": 1, "error": "TimeoutError"}])
 
     async def test_flood_wait_is_bounded_and_retryable(self):
         class Flood(Exception):
@@ -472,7 +472,7 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
         self.client.get_messages.side_effect = None
         self.client.get_messages.return_value = [media(2), media(91), media(7)]
         result = await self.run_request([7, 91, 45, 2], drop_author=False)
-        self.assertEqual(result, dict(requested=4, sent=3, missing=[45], failed=[]))
+        self.assertEqual({k: result[k] for k in ("requested", "sent", "missing", "failed")}, dict(requested=4, sent=3, missing=[45], failed=[]))
         self.client.forward_messages.assert_awaited_once_with(-1002, -1001, [7, 91])
         self.client.get_messages.return_value[0].forward.assert_awaited_once_with(-1002)
         self.client.get_messages.assert_awaited_once_with(
@@ -670,7 +670,7 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
             result = await self.api.forward_messages(
                 "@source", "@target", [7], client=sdk
             )
-        self.assertEqual(result, dict(requested=1, missing=[7], failed=[], sent=0))
+        self.assertEqual({k: result[k] for k in ("requested", "sent", "missing", "failed")}, dict(requested=1, missing=[7], failed=[], sent=0))
         sdk.invoke.assert_awaited_once()
         ids = sdk.invoke.await_args.args[0].id
         self.assertEqual([item.id for item in ids], [7])
