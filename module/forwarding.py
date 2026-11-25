@@ -144,8 +144,9 @@ def validate_request(src, dst, list_of_msg_ids, *, whole_dialog=False):
 class _TransferProgress:
     """Optional telemetry must never turn an accepted send into a failed send."""
 
-    def __init__(self, callback):
+    def __init__(self, callback, *, unit_size=0):
         self.callback = callback
+        self.unit_size = unit_size
         self.state = {}
         self.started = time.monotonic()
         self.last_emit = float("-inf")
@@ -161,7 +162,7 @@ class _TransferProgress:
             return
         self.last_emit = now
         try:
-            await self.callback(dict(self.state, elapsed=max(0, now - self.started)))
+            await self.callback(dict(self.state, elapsed=max(0, now - self.started), unit_size=self.unit_size))
         except Exception:
             pass  # Progress display is advisory; cancellation still propagates.
 
@@ -408,7 +409,7 @@ async def send_unit(
     ]
     if any(protected_media) and not drop_author:
         raise ValueError("protected media cannot retain its forwarding header")
-    progress = _TransferProgress(on_status) if on_status is not None else None
+    progress = _TransferProgress(on_status, unit_size=len(unit)) if on_status is not None else None
     scoped = _unit_client(client, progress)
     if progress is not None:
         await progress.stage("copy")

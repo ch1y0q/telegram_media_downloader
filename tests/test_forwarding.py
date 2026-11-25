@@ -829,14 +829,16 @@ class PhotoFilenameTests(unittest.IsolatedAsyncioTestCase):
         sdk.resolve_peer = AsyncMock(return_value=raw.types.InputPeerSelf())
         filenames, uploads, paths = [], [], []
 
-        async def download(selected, file_name):
+        async def download(selected, file_name, **kwargs):
             paths.append(Path(file_name))
             Path(file_name).write_bytes(b'jpeg')
+            await kwargs['progress'](4, 4)
             return file_name
 
         async def save_file(path, **kwargs):
             name = Path(path).name
             filenames.append(name)
+            await kwargs['progress'](4, 4)
             return raw.types.InputFile(id=1, parts=1, name=name, md5_checksum='')
 
         async def invoke(request, **kwargs):
@@ -851,13 +853,17 @@ class PhotoFilenameTests(unittest.IsolatedAsyncioTestCase):
         sdk.download_media = AsyncMock(side_effect=download)
         sdk.save_file = AsyncMock(side_effect=save_file)
         sdk.invoke = AsyncMock(side_effect=invoke)
+        status = AsyncMock()
         with patch('pyrogram.utils.parse_messages', AsyncMock(return_value=[sent(7),sent(8)])):
-            result = await api.send_unit(sdk,[media(7),media(8)],-1002,protected=True)
+            result = await api.send_unit(sdk,[media(7),media(8)],-1002,protected=True,on_status=status)
         self.assertEqual(len(result),2)
         self.assertEqual(filenames,['photo.jpg','photo.jpg'])
         self.assertEqual(len(uploads),2)
         self.assertNotEqual(paths[0].parent,paths[1].parent)
         self.assertTrue(all(not path.exists() for path in paths))
+        events = [call.args[0] for call in status.call_args_list]
+        self.assertTrue({'download', 'upload', 'confirm'} <= {e['stage'] for e in events})
+        self.assertTrue(all(e['unit_size'] == 2 for e in events))
 
     async def test_photo_metadata_cannot_remove_the_upload_extension(self):
         import tempfile
