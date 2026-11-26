@@ -89,6 +89,36 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
             **kwargs,
         )
 
+    async def test_pause_completes_current_album_and_never_sends_tail(self):
+        self.messages = {1:media(1),2:media(2),3:message(3),4:message(4)}
+        pause = False
+        async def after_group(result):
+            nonlocal pause
+            pause = True
+        result = await self.run_request([1,2,3,4], on_progress=after_group, should_pause=lambda:pause)
+        self.assertEqual(result['sent'],2)
+        self.assertEqual(result['pending'],[3,4])
+        self.assertEqual(result['missing'],[3,4])
+        self.assertTrue(result['paused'])
+        self.messages[3].copy.assert_not_awaited()
+        self.messages[4].copy.assert_not_awaited()
+        self.client.send_media_group.assert_awaited_once()
+
+    async def test_pause_before_first_send_is_entirely_unsent(self):
+        result = await self.run_request([1,2,3], should_pause=lambda:True)
+        self.assertEqual(result['pending'],[1,2,3])
+        self.assertEqual(result['sent'],0)
+        self.client.send_media_group.assert_not_awaited()
+        for item in self.messages.values():item.copy.assert_not_awaited()
+
+    async def test_disk_preflight_fails_before_downloading_any_protected_media(self):
+        item = media(1,kind='video',has_protected_content=True)
+        with patch.object(self.api.shutil,'disk_usage',return_value=types.SimpleNamespace(free=0)):
+            with self.assertRaisesRegex(OSError,'disk space'):
+                await self.api.send_unit(self.client,[item],-1002,drop_author=True)
+        self.client.download_media.assert_not_awaited()
+        self.client.send_video.assert_not_awaited()
+
     async def test_exact_selection_and_metadata_only(self):
         result = await self.run_request()
         self.assertEqual({k: result[k] for k in ("requested", "sent", "missing", "failed")}, dict(requested=4, sent=4, missing=[], failed=[]))
@@ -864,6 +894,8 @@ class PhotoFilenameTests(unittest.IsolatedAsyncioTestCase):
         events = [call.args[0] for call in status.call_args_list]
         self.assertTrue({'download', 'upload', 'confirm'} <= {e['stage'] for e in events})
         self.assertTrue(all(e['unit_size'] == 2 for e in events))
+        self.assertEqual({e['file_index'] for e in events if e['stage'] == 'download'}, {1,2})
+        self.assertEqual({e['file_index'] for e in events if e['stage'] == 'upload'}, {1,2})
 
     async def test_photo_metadata_cannot_remove_the_upload_extension(self):
         import tempfile

@@ -3,6 +3,7 @@
 import asyncio
 import os
 import re
+import shutil
 import tempfile
 import time
 import traceback
@@ -147,6 +148,8 @@ class _TransferProgress:
     def __init__(self, callback, *, unit_size=0):
         self.callback = callback
         self.unit_size = unit_size
+        self.file_index = 0
+        self.files = {}
         self.state = {}
         self.started = time.monotonic()
         self.last_emit = float("-inf")
@@ -162,7 +165,7 @@ class _TransferProgress:
             return
         self.last_emit = now
         try:
-            await self.callback(dict(self.state, elapsed=max(0, now - self.started), unit_size=self.unit_size))
+            await self.callback(dict(self.state, elapsed=max(0, now - self.started), unit_size=self.unit_size, file_index=self.file_index))
         except Exception:
             pass  # Progress display is advisory; cancellation still propagates.
 
@@ -250,6 +253,7 @@ def _unit_client(client, progress=None):
             # Ignore optional absent thumbnails, preserving the main-file status.
             if path is None:
                 return await original_save(path, *args, **kwargs)
+            progress.file_index = progress.files.get(path, progress.file_index)
             await progress.stage("upload", current=0,
                                  total=os.path.getsize(path) if isinstance(path, str) else 0)
             kwargs.update(progress=progress.bytes, progress_args=())
@@ -309,6 +313,11 @@ async def _download(client, message, kind, folder, progress=None):
     if kind == "photo" or name in ("", ".", ".."):
         name = fallback
     target = os.path.join(folder, name)
+    expected = getattr(media, 'file_size', 0) or 0
+    if shutil.disk_usage(folder).free < expected + 64 * 1024 * 1024:
+        raise OSError('insufficient temporary disk space')
+    if progress is not None:
+        progress.files[target] = progress.file_index
     # Pass the exact media, not the message: some SDKs prefer its replied-to story.
     options = {}
     if progress is not None:
@@ -410,8 +419,13 @@ async def send_unit(
     if any(protected_media) and not drop_author:
         raise ValueError("protected media cannot retain its forwarding header")
     progress = _TransferProgress(on_status, unit_size=len(unit)) if on_status is not None else None
+    if any(protected_media):
+        required = sum(getattr(getattr(m, media_kind(m), None), 'file_size', 0) or 0 for m,needed in zip(unit,protected_media) if needed)
+        if shutil.disk_usage(tempfile.gettempdir()).free < required + 64 * 1024 * 1024:
+            raise OSError('insufficient temporary disk space')
     scoped = _unit_client(client, progress)
     if progress is not None:
+        progress.file_index = 1
         await progress.stage("copy")
     # Real SDK RPCs retry in scoped.invoke. Never replay a high-level send if
     # result parsing encounters a FloodWait *after* Telegram accepted the send.
@@ -454,7 +468,9 @@ async def send_unit(
     else:
         with ExitStack() as stack:
             media = []
-            for m, download in zip(unit, protected_media):
+            for index, (m, download) in enumerate(zip(unit, protected_media), 1):
+                if progress is not None:
+                    progress.file_index = index
                 kind = media_kind(m)
                 if download:
                     folder = stack.enter_context(
@@ -531,7 +547,8 @@ async def forward_messages(
     group_mode="keep",
     on_progress=None,
     whole_dialog=False,
-    on_status=None
+    on_status=None,
+    should_pause=None
 ):
     """Forward exact IDs with an already connected client.
 
@@ -565,6 +582,13 @@ async def forward_messages(
                 snapshot["skipped_other_chat"] = list(result["skipped_other_chat"])
             await on_progress(snapshot)
 
+    def pause_result():
+        done = result['sent'] + len(result['missing']) + len(result['failed'])
+        pending = list_of_msg_ids[done:]
+        result['missing'].extend(pending)
+        result.update(paused=bool(pending), pending=pending)
+        return result
+
     async def deliver(unit):
         try:
             sent = await send_unit(
@@ -586,8 +610,12 @@ async def forward_messages(
     async for mid, message, error in _selected(
         client, source.id, list_of_msg_ids, batch_size, transfer
     ):
+        if should_pause is not None and should_pause():
+            return pause_result()
         for unit in planner.feed(message):
             await deliver(unit)
+            if should_pause is not None and should_pause():
+                return pause_result()
         if message is None:
             if error == "SourceChatMismatch":
                 result["missing"].append(mid)
@@ -598,5 +626,7 @@ async def forward_messages(
                 result["missing"].append(mid)
             await progress()
     for unit in planner.feed(None):
+        if should_pause is not None and should_pause():
+            return pause_result()
         await deliver(unit)
     return result
