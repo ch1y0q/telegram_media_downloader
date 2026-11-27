@@ -619,6 +619,7 @@ async def forward_messages(
     should_pause=None,
     flood_wait_budget=None,
     restart_checkpoint=None,
+    initialize=None,
 ):
     """Forward exact IDs with an already connected client.
 
@@ -691,9 +692,13 @@ async def forward_messages(
         await progress()
 
     try:
+        resolve = partial(_flood_retry, progress=transfer) if flood else _once
+        if initialize is not None:
+            if transfer is not None:
+                await transfer.stage("connect")
+            await initialize(resolve)
         if transfer is not None:
             await transfer.stage("read")
-        resolve = partial(_flood_retry, progress=transfer) if flood else _once
         source = await resolve(partial(client.get_chat, src, force_full=False))
         destination = await resolve(partial(client.get_chat, dst, force_full=False))
         if source.id == destination.id:

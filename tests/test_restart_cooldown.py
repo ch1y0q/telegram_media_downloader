@@ -45,3 +45,25 @@ class RestartCooldownTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(save.call_args.kwargs['safe_from'])
         self.assertGreater(save.call_args.kwargs['wait_until'],0)
         op.assert_awaited_once()
+
+    async def test_identity_resolver_joins_managed_floodwait_and_persists_deadline(self):
+        from types import SimpleNamespace
+        from pyrogram import errors
+        api=load_executor()
+        client=SimpleNamespace(get_chat=AsyncMock(side_effect=[SimpleNamespace(id=880),SimpleNamespace(id=-1002)]),
+                               get_messages=AsyncMock(return_value=[]))
+        identity=AsyncMock(side_effect=[errors.FloodWait(90), 101])
+        checkpoint=Mock()
+        async def initialize(resolve):
+            self.assertEqual(await resolve(identity),101)
+            client.get_chat.assert_not_awaited()
+        async def advance(seconds):
+            self.assertEqual(seconds,90)
+            self.assertGreater(checkpoint.call_args.kwargs['wait_until'],0)
+            self.assertIsNone(checkpoint.call_args.kwargs['safe_from'])
+        with patch.object(api.asyncio,'sleep',AsyncMock(side_effect=advance)):
+            result=await api.forward_messages(880,-1002,[1],client=client,
+                initialize=initialize,flood_wait_budget=100,restart_checkpoint=checkpoint)
+        self.assertEqual(identity.await_count,2)
+        self.assertEqual(result['missing'],[1])
+        self.assertEqual(checkpoint.call_args.kwargs,dict(safe_from=None,wait_until=0))
