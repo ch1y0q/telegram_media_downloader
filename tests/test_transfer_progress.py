@@ -147,3 +147,48 @@ class TransferProgressTests(unittest.IsolatedAsyncioTestCase):
         await progress.emit(force=True)
         self.assertLess(self.events[-1]['elapsed'], 1)
         self.assertEqual(self.events[-1]['current'], 10)
+
+    async def test_managed_long_wait_retries_original_sdk_request(self):
+        from pyrogram import Client, errors, raw
+
+        client = Client('offline-managed', api_id=1, api_hash='fixture', in_memory=True)
+        client.invoke = AsyncMock(side_effect=[errors.FloodWait(90), 'accepted'])
+        flood = self.api._FloodControl(100, None)
+        progress = self.api._TransferProgress(self.record, flood=flood)
+        await progress.stage('copy')
+        scoped = self.api._unit_client(client, progress)
+        request = raw.functions.messages.SendMessage(peer=raw.types.InputPeerSelf(),message='fixture',random_id=42)
+        with patch.object(self.api.asyncio,'sleep',AsyncMock()) as sleep:
+            self.assertEqual(await scoped.invoke(request), 'accepted')
+        sleep.assert_awaited_once_with(90)
+        self.assertTrue(all(call.args[0] is request for call in client.invoke.await_args_list))
+        self.assertEqual(client.invoke.await_count, 2)
+        self.assertEqual(flood.remaining, 10)
+        self.assertEqual([event['stage'] for event in self.events], ['copy','flood_wait','copy'])
+
+    async def test_managed_exhaustion_or_pause_never_attempts_later_units(self):
+        from pyrogram import errors
+
+        for budget, pause_in_wait in ((60,False),(100,True)):
+            with self.subTest(pause_in_wait=pause_in_wait):
+                paused = False
+                async def sleep(_):
+                    nonlocal paused
+                    paused = pause_in_wait
+                one, two = media(1,album=None), media(2,album=None)
+                client = types.SimpleNamespace(
+                    get_chat=AsyncMock(side_effect=[types.SimpleNamespace(id=-1001),types.SimpleNamespace(id=-1002)]),
+                    get_messages=AsyncMock(return_value=[one,two]))
+                operation = AsyncMock(side_effect=errors.FloodWait(90))
+                async def send(client,unit,dst,*,flood,**opts):
+                    progress = self.api._TransferProgress(self.record, flood=flood)
+                    await self.api._flood_retry(operation,progress,safe_to_resume=True)
+                with patch.object(self.api,'send_unit',AsyncMock(side_effect=send)) as send_unit, \
+                     patch.object(self.api.asyncio,'sleep',AsyncMock(side_effect=sleep)):
+                    result=await self.api.forward_messages(-1001,-1002,[1,2],client=client,
+                        flood_wait_budget=budget,should_pause=lambda:paused)
+                send_unit.assert_awaited_once()
+                operation.assert_awaited_once()
+                self.assertTrue(result['paused'])
+                self.assertEqual(result['pending'],[1,2])
+                self.assertGreater(result['flood_retry_at'],0)

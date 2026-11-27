@@ -1,6 +1,7 @@
 """Exact-message forwarding API; no command parsing, runtime config or startup I/O."""
 
 import asyncio
+import math
 import os
 import re
 import shutil
@@ -145,8 +146,9 @@ def validate_request(src, dst, list_of_msg_ids, *, whole_dialog=False):
 class _TransferProgress:
     """Optional telemetry must never turn an accepted send into a failed send."""
 
-    def __init__(self, callback, *, unit_size=0):
+    def __init__(self, callback, *, unit_size=0, flood=None):
         self.callback = callback
+        self.flood = flood
         self.unit_size = unit_size
         self.file_index = 0
         self.files = {}
@@ -178,26 +180,56 @@ class _TransferProgress:
         await self.emit()
 
 
-async def _flood_retry(operation, progress=None):
+class _FloodDeferred(Exception):
+    def __init__(self, retry_at, *, safe_to_resume=False):
+        super().__init__('Telegram rejected the request until the cooldown expires')
+        self.retry_at = retry_at
+        self.safe_to_resume = safe_to_resume
+
+
+class _FloodControl:
+    def __init__(self, budget, should_pause):
+        self.remaining = budget
+        self.should_pause = should_pause
+
+    async def wait(self, delay, attempt, *, safe_to_resume):
+        retry_at = math.ceil(time.time() + delay)
+        deferred = _FloodDeferred(retry_at, safe_to_resume=safe_to_resume)
+        if attempt == 2 or delay > self.remaining:
+            raise deferred
+        self.remaining -= delay
+        if self.should_pause is None:
+            await asyncio.sleep(delay)
+            return
+        for start in range(0, delay, 2):
+            if self.should_pause():
+                raise deferred
+            await asyncio.sleep(min(2, delay - start))
+        if self.should_pause():
+            raise deferred
+
+
+async def _flood_retry(operation, progress=None, *, safe_to_resume=False):
+    managed = progress.flood if progress is not None else None
     for attempt in range(3):
         try:
             return await operation()
         except Exception as exc:
-            if (
-                getattr(exc, "ID", "") not in {
-                    "FLOOD_WAIT", "FLOOD_WAIT_X", "FLOOD_PREMIUM_WAIT", "FLOOD_PREMIUM_WAIT_X"
-                }
-                or attempt == 2
-            ):
+            if getattr(exc, "ID", "") not in {
+                "FLOOD_WAIT", "FLOOD_WAIT_X", "FLOOD_PREMIUM_WAIT", "FLOOD_PREMIUM_WAIT_X"
+            }:
                 raise
             delay = max(1, int(getattr(exc, "value", 1)))
-            if delay > MAX_FLOOD_WAIT_SECONDS:
+            if managed is None and (attempt == 2 or delay > MAX_FLOOD_WAIT_SECONDS):
                 raise
             previous = None
             if progress is not None:
                 previous = (dict(progress.state), progress.started)
                 await progress.stage("flood_wait", seconds=delay)
-            await asyncio.sleep(delay)
+            if managed is None:
+                await asyncio.sleep(delay)
+            else:
+                await managed.wait(delay, attempt, safe_to_resume=safe_to_resume)
             if previous is not None:
                 progress.state, progress.started = previous
                 await progress.emit(force=True)
@@ -245,7 +277,12 @@ def _unit_client(client, progress=None):
 
     async def invoke(query, **kwargs):
         kwargs.update(retries=0, sleep_threshold=0)
-        return await _flood_retry(partial(client.invoke, query, **kwargs), progress)
+        # Only these destination RPCs can prove that the actual send was rejected.
+        rejected_send_is_safe = type(query).__name__ in {
+            "SendMessage", "SendMedia", "SendMultiMedia", "ForwardMessages"
+        }
+        return await _flood_retry(partial(client.invoke, query, **kwargs), progress,
+                                  safe_to_resume=rejected_send_is_safe)
 
     if progress is not None:
         original_save = scoped.save_file
@@ -394,7 +431,7 @@ def _confirmed(response, count, dst) -> list[Any]:
 
 
 async def send_unit(
-    client, messages, dst, *, drop_author=True, protected=False, on_status=None
+    client, messages, dst, *, drop_author=True, protected=False, on_status=None, flood=None
 ) -> list[Any]:
     """Send an already received/planned unit exactly once except explicit FloodWait."""
     unit = list(messages)
@@ -420,7 +457,7 @@ async def send_unit(
     ]
     if any(protected_media) and not drop_author:
         raise ValueError("protected media cannot retain its forwarding header")
-    progress = _TransferProgress(on_status, unit_size=len(unit)) if on_status is not None else None
+    progress = _TransferProgress(on_status, unit_size=len(unit), flood=flood) if on_status is not None or flood else None
     if any(protected_media):
         required = sum(getattr(getattr(m, media_kind(m), None), 'file_size', 0) or 0 for m,needed in zip(unit,protected_media) if needed)
         if shutil.disk_usage(tempfile.gettempdir()).free < required + 64 * 1024 * 1024:
@@ -526,6 +563,8 @@ async def _selected(client, source_id, ids, batch_size, progress=None):
                     found[m.id] = None
                 else:
                     found[m.id] = m
+        except _FloodDeferred:
+            raise
         except Exception as exc:
             detail = failure_detail(exc, "read")
             for mid in batch:
@@ -550,7 +589,8 @@ async def forward_messages(
     on_progress=None,
     whole_dialog=False,
     on_status=None,
-    should_pause=None
+    should_pause=None,
+    flood_wait_budget=None,
 ):
     """Forward exact IDs with an already connected client.
 
@@ -564,14 +604,8 @@ async def forward_messages(
     if group_mode == "force" and not drop_author:
         raise ValueError("force grouping requires drop_author=True")
     list_of_msg_ids = list(list_of_msg_ids)
-    transfer = _TransferProgress(on_status) if on_status is not None else None
-    if transfer is not None:
-        await transfer.stage("read")
-    source = await client.get_chat(src, force_full=False)
-    destination = await client.get_chat(dst, force_full=False)
-    if source.id == destination.id:
-        raise ValueError("source and destination must differ")
-    protected = bool(getattr(source, "has_protected_content", False))
+    flood = _FloodControl(flood_wait_budget, should_pause) if flood_wait_budget is not None else None
+    transfer = _TransferProgress(on_status, flood=flood) if on_status is not None or flood else None
     result = {"requested": len(list_of_msg_ids), "sent": 0, "missing": [], "failed": [], "receipts": []}
     batch_size = 1 if sequential and group_mode == "split" else 100
 
@@ -584,11 +618,13 @@ async def forward_messages(
                 snapshot["skipped_other_chat"] = list(result["skipped_other_chat"])
             await on_progress(snapshot)
 
-    def pause_result():
+    def pause_result(flood_error=None):
         done = result['sent'] + len(result['missing']) + len(result['failed'])
         pending = list_of_msg_ids[done:]
         result['missing'].extend(pending)
         result.update(paused=bool(pending), pending=pending)
+        if flood_error is not None:
+            result['flood_retry_at'] = flood_error.retry_at
         return result
 
     async def deliver(unit):
@@ -600,35 +636,52 @@ async def forward_messages(
                 drop_author=drop_author,
                 protected=protected,
                 **({"on_status": on_status} if on_status is not None else {}),
+                **({"flood": flood} if flood is not None else {}),
             )
             result["sent"] += len(sent)
             result["receipts"].extend({"source": original.id, "chat": destination.id, "id": target.id}
                                       for original, target in zip(unit, sent))
+        except _FloodDeferred as exc:
+            if not exc.safe_to_resume:
+                detail = failure_detail(exc, "send")
+                result["failed"].extend(dict(detail, id=m.id) for m in unit)
+            raise
         except Exception as exc:
             detail = failure_detail(exc, "send")
             result["failed"].extend(dict(detail, id=m.id) for m in unit)
         await progress()
 
-    async for mid, message, error in _selected(
-        client, source.id, list_of_msg_ids, batch_size, transfer
-    ):
-        if should_pause is not None and should_pause():
-            return pause_result()
-        for unit in planner.feed(message):
-            await deliver(unit)
+    try:
+        if transfer is not None:
+            await transfer.stage("read")
+        resolve = partial(_flood_retry, progress=transfer) if flood else _once
+        source = await resolve(partial(client.get_chat, src, force_full=False))
+        destination = await resolve(partial(client.get_chat, dst, force_full=False))
+        if source.id == destination.id:
+            raise ValueError("source and destination must differ")
+        protected = bool(getattr(source, "has_protected_content", False))
+        async for mid, message, error in _selected(
+            client, source.id, list_of_msg_ids, batch_size, transfer
+        ):
             if should_pause is not None and should_pause():
                 return pause_result()
-        if message is None:
-            if error == "SourceChatMismatch":
-                result["missing"].append(mid)
-                result.setdefault("skipped_other_chat", []).append(mid)
-            elif error:
-                result["failed"].append(dict(error, id=mid))
-            else:
-                result["missing"].append(mid)
-            await progress()
-    for unit in planner.feed(None):
-        if should_pause is not None and should_pause():
-            return pause_result()
-        await deliver(unit)
-    return result
+            for unit in planner.feed(message):
+                await deliver(unit)
+                if should_pause is not None and should_pause():
+                    return pause_result()
+            if message is None:
+                if error == "SourceChatMismatch":
+                    result["missing"].append(mid)
+                    result.setdefault("skipped_other_chat", []).append(mid)
+                elif error:
+                    result["failed"].append(dict(error, id=mid))
+                else:
+                    result["missing"].append(mid)
+                await progress()
+        for unit in planner.feed(None):
+            if should_pause is not None and should_pause():
+                return pause_result()
+            await deliver(unit)
+        return result
+    except _FloodDeferred as exc:
+        return pause_result(exc)
