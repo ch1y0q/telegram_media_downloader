@@ -458,7 +458,8 @@ def _confirmed(response, count, dst) -> list[Any]:
 
 
 async def send_unit(
-    client, messages, dst, *, drop_author=True, protected=False, on_status=None, flood=None
+    client, messages, dst, *, drop_author=True, protected=False, on_status=None, flood=None,
+    flood_wait_budget=None, flood_checkpoint=None,
 ) -> list[Any]:
     """Send an already received/planned unit exactly once except explicit FloodWait."""
     unit = list(messages)
@@ -484,6 +485,12 @@ async def send_unit(
     ]
     if any(protected_media) and not drop_author:
         raise ValueError("protected media cannot retain its forwarding header")
+    if flood_wait_budget is not None:
+        if flood is not None or type(flood_wait_budget) is not int or flood_wait_budget < 0:
+            raise ValueError("invalid per-unit FloodWait budget")
+        flood = _FloodControl(flood_wait_budget, None, flood_checkpoint)
+        # The caller owns this unit's receipt and can distinguish a rejected RPC.
+        flood.unit = (0, len(unit))
     progress = _TransferProgress(on_status, unit_size=len(unit), flood=flood) if on_status is not None or flood else None
     if any(protected_media):
         required = sum(getattr(getattr(m, media_kind(m), None), 'file_size', 0) or 0 for m,needed in zip(unit,protected_media) if needed)
@@ -495,7 +502,7 @@ async def send_unit(
         await progress.stage("copy")
     # Real SDK RPCs retry in scoped.invoke. Never replay a high-level send if
     # result parsing encounters a FloodWait *after* Telegram accepted the send.
-    send = partial(_flood_retry, progress=progress) if scoped is client else _once
+    send = partial(_flood_retry, progress=progress) if scoped is client and flood_wait_budget is None else _once
     if len(unit) == 1:
         m = unit[0]
         kind = media_kind(m)

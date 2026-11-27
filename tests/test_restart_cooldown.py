@@ -1,10 +1,38 @@
 import asyncio
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 from tests.test_forwarding import load_executor
 
 
 class RestartCooldownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bot_unit_waits_over_sixty_seconds_and_retries_only_the_same_rpc(self):
+        from pyrogram import Client, errors, raw
+        api = load_executor()
+        client = Client('offline-bot-unit', api_id=1, api_hash='fixture', in_memory=True)
+        rpc = raw.functions.messages.SendMessage(peer=raw.types.InputPeerSelf(), message='fixture', random_id=42)
+        receipt = SimpleNamespace(id=8, chat=SimpleNamespace(id=-1002))
+        client.invoke = AsyncMock(side_effect=[errors.FloodWait(90), receipt])
+        checkpoints = Mock()
+
+        class Message:
+            id = 1
+            _client = client
+
+            async def copy(self, *args, **kwargs):
+                return await self._client.invoke(rpc)
+
+        async def wait(seconds):
+            self.assertEqual(seconds, 90)
+            self.assertEqual(checkpoints.call_args.kwargs['safe_from'], 0)
+            self.assertGreater(checkpoints.call_args.kwargs['wait_until'], 0)
+
+        with patch.object(api.asyncio, 'sleep', side_effect=wait):
+            self.assertEqual(await api.send_unit(client, [Message()], -1002, flood_wait_budget=100,
+                                                 flood_checkpoint=checkpoints), [receipt])
+        self.assertEqual([call.args for call in client.invoke.await_args_list], [(rpc,), (rpc,)])
+        self.assertEqual(checkpoints.call_args.kwargs, dict(safe_from=1, wait_until=0))
+
     async def test_exact_rpc_is_marked_unsent_during_wait_and_in_flight_before_retry(self):
         from pyrogram import Client, errors, raw
         api=load_executor()
