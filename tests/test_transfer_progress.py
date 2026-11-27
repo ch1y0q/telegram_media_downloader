@@ -47,6 +47,40 @@ class TransferProgressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, [sent(1)])
         item.copy.assert_awaited_once()
 
+    async def test_real_sdk_flood_wait_ids_retry_the_same_rpc(self):
+        from pyrogram import Client, errors, raw
+
+        for error_type in (errors.FloodWait, errors.FloodPremiumWait):
+            with self.subTest(error_type=error_type.__name__):
+                client = Client("offline-flood", api_id=1, api_hash="fixture", in_memory=True)
+                client.invoke = AsyncMock(side_effect=[error_type(4), "accepted"])
+                scoped = self.api._unit_client(client)
+                request = raw.functions.messages.SendMessage(
+                    peer=raw.types.InputPeerSelf(), message="offline", random_id=42
+                )
+                with patch.object(self.api.asyncio, "sleep", AsyncMock()) as sleep:
+                    self.assertEqual(await scoped.invoke(request), "accepted")
+                sleep.assert_awaited_once_with(4)
+                self.assertEqual(client.invoke.await_count, 2)
+                for call in client.invoke.await_args_list:
+                    self.assertIs(call.args[0], request)
+                    self.assertEqual(call.kwargs, {"retries": 0, "sleep_threshold": 0})
+
+    async def test_real_sdk_flood_wait_respects_existing_limits(self):
+        from pyrogram import errors
+
+        too_long = AsyncMock(side_effect=errors.FloodWait(self.api.MAX_FLOOD_WAIT_SECONDS + 1))
+        repeated = AsyncMock(side_effect=errors.FloodWait(1))
+        with patch.object(self.api.asyncio, "sleep", AsyncMock()) as sleep:
+            with self.assertRaises(errors.FloodWait):
+                await self.api._flood_retry(too_long)
+            too_long.assert_awaited_once()
+            sleep.assert_not_awaited()
+            with self.assertRaises(errors.FloodWait):
+                await self.api._flood_retry(repeated)
+            self.assertEqual(repeated.await_count, 3)
+            self.assertEqual(sleep.await_count, 2)
+
     async def test_flood_wait_restores_phase_without_retrying_other_errors(self):
         class Flood(Exception):
             ID, value = 'FLOOD_WAIT', 2

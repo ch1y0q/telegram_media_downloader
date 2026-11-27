@@ -184,7 +184,9 @@ async def _flood_retry(operation, progress=None):
             return await operation()
         except Exception as exc:
             if (
-                getattr(exc, "ID", "") not in {"FLOOD_WAIT", "FLOOD_PREMIUM_WAIT"}
+                getattr(exc, "ID", "") not in {
+                    "FLOOD_WAIT", "FLOOD_WAIT_X", "FLOOD_PREMIUM_WAIT", "FLOOD_PREMIUM_WAIT_X"
+                }
                 or attempt == 2
             ):
                 raise
