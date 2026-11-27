@@ -187,13 +187,36 @@ class _FloodDeferred(Exception):
         self.safe_to_resume = safe_to_resume
 
 
+class _CheckpointError(RuntimeError):
+    pass
+
+
 class _FloodControl:
-    def __init__(self, budget, should_pause):
+    def __init__(self, budget, should_pause, checkpoint=None):
         self.remaining = budget
         self.should_pause = should_pause
+        self.checkpoint = checkpoint
+        self.unit = None
 
-    async def wait(self, delay, attempt, *, safe_to_resume):
-        retry_at = math.ceil(time.time() + delay)
+    def save_checkpoint(self, **state):
+        if self.checkpoint is not None:
+            try:
+                self.checkpoint(**state)
+            except (OSError, ValueError, KeyError) as exc:
+                raise _CheckpointError('forwarding checkpoint unavailable') from exc
+
+    def begin_unit(self, start, end):
+        self.unit = (start, end)
+        self.save_checkpoint(safe_from=end, wait_until=0)
+
+    def cooldown(self, retry_at, *, safe_to_resume):
+        safe_from = self.unit[0] if self.unit and safe_to_resume else None
+        self.save_checkpoint(safe_from=safe_from, wait_until=retry_at)
+
+    def rearm(self):
+        self.save_checkpoint(safe_from=self.unit[1] if self.unit else None, wait_until=0)
+
+    async def wait(self, delay, attempt, *, retry_at, safe_to_resume):
         deferred = _FloodDeferred(retry_at, safe_to_resume=safe_to_resume)
         if attempt == 2 or delay > self.remaining:
             raise deferred
@@ -222,6 +245,9 @@ async def _flood_retry(operation, progress=None, *, safe_to_resume=False):
             delay = max(1, int(getattr(exc, "value", 1)))
             if managed is None and (attempt == 2 or delay > MAX_FLOOD_WAIT_SECONDS):
                 raise
+            retry_at = math.ceil(time.time() + delay)
+            if managed is not None:
+                managed.cooldown(retry_at, safe_to_resume=safe_to_resume)
             previous = None
             if progress is not None:
                 previous = (dict(progress.state), progress.started)
@@ -229,7 +255,8 @@ async def _flood_retry(operation, progress=None, *, safe_to_resume=False):
             if managed is None:
                 await asyncio.sleep(delay)
             else:
-                await managed.wait(delay, attempt, safe_to_resume=safe_to_resume)
+                await managed.wait(delay, attempt, retry_at=retry_at, safe_to_resume=safe_to_resume)
+                managed.rearm()
             if previous is not None:
                 progress.state, progress.started = previous
                 await progress.emit(force=True)
@@ -563,7 +590,7 @@ async def _selected(client, source_id, ids, batch_size, progress=None):
                     found[m.id] = None
                 else:
                     found[m.id] = m
-        except _FloodDeferred:
+        except (_FloodDeferred, _CheckpointError):
             raise
         except Exception as exc:
             detail = failure_detail(exc, "read")
@@ -591,6 +618,7 @@ async def forward_messages(
     on_status=None,
     should_pause=None,
     flood_wait_budget=None,
+    restart_checkpoint=None,
 ):
     """Forward exact IDs with an already connected client.
 
@@ -604,7 +632,7 @@ async def forward_messages(
     if group_mode == "force" and not drop_author:
         raise ValueError("force grouping requires drop_author=True")
     list_of_msg_ids = list(list_of_msg_ids)
-    flood = _FloodControl(flood_wait_budget, should_pause) if flood_wait_budget is not None else None
+    flood = _FloodControl(flood_wait_budget, should_pause, restart_checkpoint) if flood_wait_budget is not None else None
     transfer = _TransferProgress(on_status, flood=flood) if on_status is not None or flood else None
     result = {"requested": len(list_of_msg_ids), "sent": 0, "missing": [], "failed": [], "receipts": []}
     batch_size = 1 if sequential and group_mode == "split" else 100
@@ -628,6 +656,12 @@ async def forward_messages(
         return result
 
     async def deliver(unit):
+        if flood is not None:
+            done = result['sent'] + len(result['missing']) + len(result['failed'])
+            end = done + len(unit)
+            if restart_checkpoint is not None and [m.id for m in unit] != list_of_msg_ids[done:end]:
+                raise ValueError('send unit does not match durable forwarding cursor')
+            flood.begin_unit(done, end)
         try:
             sent = await send_unit(
                 client,
@@ -641,6 +675,8 @@ async def forward_messages(
             result["sent"] += len(sent)
             result["receipts"].extend({"source": original.id, "chat": destination.id, "id": target.id}
                                       for original, target in zip(unit, sent))
+        except _CheckpointError:
+            raise
         except _FloodDeferred as exc:
             if not exc.safe_to_resume:
                 detail = failure_detail(exc, "send")
@@ -649,6 +685,9 @@ async def forward_messages(
         except Exception as exc:
             detail = failure_detail(exc, "send")
             result["failed"].extend(dict(detail, id=m.id) for m in unit)
+        finally:
+            if flood is not None:
+                flood.unit = None
         await progress()
 
     try:
